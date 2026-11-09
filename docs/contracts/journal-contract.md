@@ -54,11 +54,13 @@ Cost, stated honestly: storage grows with `entity size × mutation count`, not w
 
 ## 5. Entry types
 
-`REPLAYABLE_ENTRY_TYPES` (17) — `projection.baseline`, `decision.recorded`, `decision.status_changed`, `decision.superseded`, `decision.aged`, `attempt.recorded`, `fact.observed`, `fact.superseded`, `fact.expired`, `outcome.recorded`, `confidence.changed`, `relation.created`, `memory.recorded`, `memory.indexed`, `memory.superseded`, `memory.invalidated`, `project.purged`.
+`REPLAYABLE_ENTRY_TYPES` (27) — `projection.baseline`, `decision.recorded`, `decision.status_changed`, `decision.superseded`, `decision.aged`, `decision.staled`, `attempt.recorded`, `memory.recorded`, `memory.indexed`, `memory.superseded`, `memory.invalidated`, `fact.observed`, `fact.verified`, `fact.superseded`, `fact.expired`, `outcome.recorded`, `confidence.changed`, `relation.created`, `project.purged`, `origin.purged`, `restore.reapplied`, `entity.attributed`, `entity.token_assigned`, `capture.recorded`, `capture.state_changed`, `extraction.completed`, `extraction.failed`.
 
-`NON_REPLAYABLE_ENTRY_TYPES` (1) — `legacy_metadata_event`.
+`restore.reapplied` (read since PR-37a; written from PR-37c) records that a restore re-applied the store's deletion knowledge. A restore's post-step writes it: a logical entry when it removed anything logically or gave a tokenless item it quarantines a token, then a hard entry when it removed anything hard or spliced entries out; a restore that changes nothing writes none, and the owner's `quarantine purge`, which is not a restore, writes none either. It names no project, entity or content: its payload holds only its `mode` (`logical` or `hard`), `removedJournalSequences` (empty when logical; for hard, positive, strictly increasing and earlier than the entry, and counted as hard-gap evidence exactly as a hard `project.purged` marker's ledger is) and the counts `removed`, `quarantined`, `skeletons` and `spliced`. Nothing else is accepted. It folds as a no-op: what the restore re-applied is in the skeletons and splices around it.
 
-**Every listed type is produced by real code.** No aspirational types. `appendJournal()` throws `Unknown journal entry type: <type>` on anything else, so a typo cannot silently create a new type.
+`NON_REPLAYABLE_ENTRY_TYPES` (1) — `legacy_metadata_event`. `JOURNAL_ENTRY_TYPES` is the 28 together.
+
+**Every listed type is produced by real code**: `restore.reapplied` was read first (PR-37a) and is written from PR-37c, and the four capture types were read first (plan v1.4.4 §9.5, PR-33) and are written by the privileged capture writer (PR-34). `recordCapture` journals `capture.recorded`, and `transitionCapture` journals the one type of each §12.5 edge: pending to processing, failed to pending and failed to blocked as `capture.state_changed`; processing to extracted as `extraction.completed`; processing to failed as `extraction.failed`. Activated capture hooks call the capture writer; the separately activated extraction worker uses its guarded claim and completion paths. Besides it, only import's journal-less normalisation writes a capture type, for a capture item it was given, by the item's state. Each carries the complete post-change capture item (kind `capture`, entity kind `capture`, folded into `records`), and each may leave the item only in its own states -- `capture.recorded` pending or blocked; `capture.state_changed` pending, processing or blocked; `extraction.completed` extracted; `extraction.failed` pending, failed or blocked. An entry of the type whose payload is not a well-formed capture item, or leaves it in another state, is refused at import and restore, and a pure rebuild skips it as `type_payload_postcondition_mismatch` and makes the journal unrebuildable; an entry or item of a future schema is carried, never judged. A capture entry's skeleton may give `redactedReason: 'capture_deleted'`, which no other type may, and a logical purge keeps it. A capture changes owner only through `entity.attributed` (below), never through `capture.state_changed`, which does not move its retry values; a purge of the project it left keeps its history, as it keeps a moved record's. No public read returns a capture entry, a skeleton included. `entity.attributed` was read first and written later (reader-first, plan v1.4.4 §9.2): it records a change to which project, or which capture origin, a decision, attempt, memory or fact belongs (and, read since PR-33 though nothing on this build attributes one, a capture item). Its payload is the complete post-change entity plus one `attributionChange` object (`previousProject`, `previousAttribution`, `reason: migration | user`) that is audit only and never part of the replayed entity; the entry's `project` is the new one, or `null` for an unattributed entity. It replays by the same last-snapshot-wins fold as every other entity entry, so a rebuild reproduces the new owner. On a fact it may move the fact between owners but may not revive, end or verify it. `entity.token_assigned` was likewise read (plan v1.4.4 PR-20) before `migrate` wrote it (PR-21): it gives a tokenless decision, attempt, memory or fact the random, content-free `erasureToken` a purge tombstone names it by. Its payload is the complete post-change entity, and it replays only when the entity it names has been recorded, has no token yet, and the payload is that entity with the token added and nothing else changed; any other entry of the type is skipped as `invalid_token_assignment` and makes the journal unrebuildable. A replayed assignment moves the entity's retry values with it, as attribution does. It also marks quarantine (PR-37c): a restore's post-step gives each tokenless item it quarantines a token by one such entry, the same backfill shape, and the store's ledger then names that token in its `quarantine`. Every other write gives a tokenless entity its token on that write's own entry, and a new entity has one from its first entry; the writer puts the token on the entity's retry values too. `migrate`'s backfill writes each assignment as the entity's last journal snapshot with the token added, which is what a reader replays it onto, even where loading has since reshaped the live entity. On every stored decision, attempt, memory, fact and relation — live, as a retry value, in a journal payload or in a baseline — a token is a non-empty string on a decision, attempt, memory or fact that names its kind and id, and no two live entities share one; import and restore refuse anything else, except in data of a future schema, which is carried verbatim. A capture item always carries a token of its own, checked with its shape, and shares it with no other entity. An `entity.attributed` or `entity.token_assigned` entry of a future schema is carried, whatever entity it names. The token is internal: no public read returns it. Entries up to schema 7 are readable; schema-6 and schema-7 entries follow the same purge-artifact rules as schema 5. `appendJournal()` throws `Unknown journal entry type: <type>` on anything else, so a typo cannot silently create a new type.
 
 **Alternatives deliberately have no entry type.** They have no independent mutation API — they are created inside `addDecision` and read by `review()` — so giving them entries would imply an editing capability that does not exist. They ride inside the decision snapshot. This is a documented design decision, not an omission.
 
@@ -105,7 +107,7 @@ The rule that matters: **a partial projection is never returned as if it were co
 
 Pre-existing events carry `{id, type, at, project, recordId}` and **no payload**. They cannot be replayed. Claiming retroactive rebuildability would be fabrication.
 
-`journalEpoch` is the first replayable boundary, persisted in `exportData()` and restored on import. Rebuild replays `seq >= journalEpoch`. A migration extension never advances an existing epoch. A leading hard-purge gap may leave the first surviving sequence greater than the epoch only when the purge ledger proves every missing sequence. With `options.requireFullHistory`, a journal containing pre-epoch metadata-only entries returns `rebuildable: false, reason: 'pre-epoch metadata-only entries are not replayable'`.
+`journalEpoch` is the first replayable boundary, persisted in the store snapshot and restored on import. Rebuild replays `seq >= journalEpoch`. A migration extension never advances an existing epoch. A leading hard-purge gap may leave the first surviving sequence greater than the epoch only when the purge ledger proves every missing sequence. With `options.requireFullHistory`, a journal containing pre-epoch metadata-only entries returns `rebuildable: false, reason: 'pre-epoch metadata-only entries are not replayable'`.
 
 `projection.baseline` carries a full projection snapshot for migrated stores. It is a **reconstruction from live state at migration time**, and is labelled as such — not as replayed history.
 
@@ -115,13 +117,47 @@ Pre-existing events carry `{id, type, at, project, recordId}` and **no payload**
 
 **Hard (explicit, never default).** `{ mode: 'hard' }` or `{ hard: true }`. Entries are spliced out. This **creates a `seq` gap** — declared, not hidden: `journalGaps()` reports the missing ranges and `validate()` surfaces them as `journal_gap` at severity `info`. The surviving purge marker contains no raw entity IDs; it carries only the exact transitive `removedJournalSequences` ledger needed as irreversible gap evidence, and later hard/logical purges preserve that evidence. The shared direct-import/replace and JSON/SQLite restore validator requires every ledger value to be a positive safe integer, unique in its marker, an actual missing sequence in the replay range, and strictly earlier than the marker that claims it. A missing sequence is accepted only when a later surviving hard marker covers it; duplicate, future/early, present/unrelated, and incomplete claims fail closed through JavaScript, CLI, HTTP, and MCP. Coverage uses sorted ranges and cursors, never materializes a missing range, and therefore rejects enormous forged gaps with bounded work. Returns `journalEntriesRemoved`.
 
-Both modes remove relations pointing at purged entities, so referential integrity holds after either.
+Both modes remove relations pointing at purged entities, so referential integrity holds after either. Both also remove the runtime miss ledger's entries recorded in the project or naming an entity the purge removes (`runtimeMisses`, an operational collection outside the journal) and report how many in `runtimeMisses`; a SQLite save that removes an entry scrubs it (`secure_delete`, `VACUUM`). Both remove the project's capture items (counted in `removed`, and their entries in `journal`; a hard purge's `removedJournalSequences` include theirs) with their retry values and journal entries, the `captureContent` entries the project owns or a removed capture names, and the `captureSessions` entries it owns, deleting a collection its last entry leaves; the SQLite scrub covers them too. A capture item that belongs to an origin, not a project, stays.
 
 **Right to erasure vs auditability:** hard purge is the deliberate exception. It satisfies erasure at the cost of a discontinuous journal, which is why the sequence gap is reported rather than concealed, and why "append-only" is not claimed anywhere.
 
+The origin-deletion reader also understands `origin.purged`: a null project,
+`entityKind: origin`, null entity ID, and the closed payload `{ originId, mode,
+removed, removedJournalSequences }`. It selects only explicitly unattributed
+entities with that origin; a project-owned entity's origin is provenance and
+does not put it in this scope. The same canonical marker and hard-gap rules
+apply. The initial origin reader accepted completed artifacts while refusing
+origin-sensitive restore and pending origin recovery. The subsequent PR43 writer
+implements exact unattributed-origin purge and recovery. Carrying unknown members
+in an earlier build does not establish semantic reader compatibility.
+The origin type always uses the closed scope rules, even with an omitted or
+historical entry schema label; legacy project-wide relation deletion never
+applies to an origin marker. PR42 predecessors can carry logical origin markers
+without replaying them and can retain origin-owned non-entity material in a
+tombstone overlay. They are not supported semantic readers after origin writes.
+This separate reader is the minimum floor for completed origin artifacts;
+origin-sensitive restore or pending recovery requires the later complete writer
+floor. Its conservative refusal includes backup recovery before any pending
+record is discarded or cleared. A migration baseline may add a retry key but
+may not rebind an existing key to a different entity.
+
+Canonical origin-deletion skeletons use the explicit `origin_purged` reason.
+They retain the same closed, identity-free skeleton shape as project deletion;
+accepting this reason does not admit arbitrary fields or restore erased state.
+An ordinary restore ledger may omit its empty tombstone array. Origin recovery
+checks still examine both existing tombstones and additions in a pending record.
+
+Deletion may leave a midstream migration baseline with no new state. Only a
+baseline changed by that deletion, whose surviving entities and retry mappings
+are identical to the surviving prefix, loses its replay effect: logical deletion
+keeps an allowlisted skeleton; hard deletion accounts for its sequence in the
+marker. Initial baselines and baselines retaining new entities or retry mappings
+remain. A new retry mapping must match its existing canonical entity. Baseline
+placement still refuses rewrites or resurrection of existing state.
+
 ## 10. Atomicity — by co-location, not protocol
 
-The journal lives **inside the same payload as the state** and is written by the same operation. JSON: `exportData()` serializes both, `save()` does one temp-write plus `rename()`. SQLite: `save()` runs `BEGIN IMMEDIATE` → replace → `COMMIT`. State and journal therefore **cannot** diverge on a failed write.
+The journal lives **inside the same payload as the state** and is written by the same operation. JSON: the store snapshot serializes both, `save()` does one temp-write plus `rename()`. SQLite: `save()` runs `BEGIN IMMEDIATE` → replace → `COMMIT`. State and journal therefore **cannot** diverge on a failed write.
 
 **Binding rule for future work:** never persist the journal through a separate file, table write, or transaction. Doing so voids this guarantee and makes a two-phase protocol mandatory.
 
@@ -137,3 +173,9 @@ The residual failure mode is benign and different: a crash between an in-memory 
 2. An entry claiming `sourceClass: 'human_confirmed'` yields a fact that is still `unverified`. A journal file is caller input, and the provenance contract §2 applies to it identically.
 3. Rebuild cannot newly mint `verified` (§6).
 4. `redact()` covers journal payloads. Secrets must not survive redaction inside an entry.
+
+## Capture lifecycle and retry projection
+
+Generation, leases, retained raw, pending deletion and usage reservations have distinct persistence rules; the journal alone is not the complete worker or deletion-control state. See [integrated lifecycle](integrated-lifecycle-contract.md) and the [data lifecycle map](../data-lifecycle.md). Reads never complete pending purge or restore work.
+
+A journal-less overwrite compares validated current retry projections on both sides, preserving exact keys, owner, kind and semantic identity. A legitimate lifecycle change therefore need not prevent an unrelated overwrite. An index-only memory refresh keeps identity and version, reserves capacity for all aliases before mutation, and emits one existing `memory.indexed` snapshot per retry alias. Rebuild reproduces the same retry mappings; malformed or forged bindings still refuse.

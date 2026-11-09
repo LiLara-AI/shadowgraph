@@ -23,13 +23,19 @@
 // tuning, and a holdout number claimed after tuning on holdout is worthless.
 //
 // Each case also records, per known-relevant record, whether the engine
-// delivered it, ranked it too low, or missed it (`--json`, `cases[].relevant`).
-// That annotation does not feed the score.
+// delivered it, ranked it too low, reached it only by expanding a delivered
+// line, or missed it (`--json`, `cases[].relevant`), and every miss goes into
+// `missLedger` with the signals the engine reported. The default read (PR-26,
+// compact lines) is evaluated beside the three search paths, the lines it
+// delivers are checked for the phrases their meaning rests on (`fidelity`), and
+// `evg10` says whether the semantic signal was populated at all. None of that
+// feeds the score (plan v1.4.4 §17.3; G-5 §6.2, G5-9; PR-28).
 //
 // Usage:
 //   node scripts/retrieval-eval.mjs                 dev split, table
 //   node scripts/retrieval-eval.mjs --split holdout run the held-out cases
 //   node scripts/retrieval-eval.mjs --json
+import { createHash } from 'node:crypto';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createShadowGraph } from '../src/shadowgraph.js';
@@ -164,6 +170,26 @@ export const CASES = [
   { id: 'h-trap', category: 'crossProject', split: 'holdout', query: 'catalogue endpoint latency', mustNotReturn: ['d-trap'] }
 ];
 
+// Fidelity (plan v1.4.4 §17.3; AC-017; G-5 §6.3): the line the default read
+// delivers for a record must keep each phrase its meaning rests on -- the
+// negation and the scope qualifier of the PR-25 fixtures G5-1 and G5-3, here on
+// the evaluation's own path. The attempt lives in a project of its own, so the
+// retrieval cases above never see it.
+const FIDELITY_PROJECT = 'eval-fidelity';
+export const FIDELITY_CORPUS = [
+  {
+    id: 'a-eu-export', project: FIDELITY_PROJECT,
+    solution: 'Retry failed invoice exports every night',
+    environment: 'EU tenants only',
+    result: 'duplicate invoices reached two tenants',
+    resultClass: 'failed'
+  }
+];
+export const FIDELITY_CASES = [
+  { id: 'fid-noretry', split: 'dev', project: PROJECT, query: 'payment webhooks', record: 'd-noretry', mustPreserve: ['never retried automatically'] },
+  { id: 'fid-eu-export', split: 'dev', project: FIDELITY_PROJECT, query: 'invoice exports', record: 'a-eu-export', mustPreserve: ['EU tenants only'] }
+];
+
 export function buildGraph() {
   const graph = createShadowGraph();
   const ids = new Map();
@@ -177,6 +203,7 @@ export function buildGraph() {
     });
     ids.set(entry.id, created.id);
   }
+  for (const { id, ...attempt } of FIDELITY_CORPUS) ids.set(id, graph.addAttempt(attempt).id);
   return { graph, ids };
 }
 
@@ -201,14 +228,99 @@ export function groundCases(cases = CASES, corpus = CORPUS) {
 // What happened to each known-relevant record, read from the engine's actual
 // output -- a miss is recorded, never inferred, and the record merely existing
 // in the store counts for nothing. `delivered` is inside the RANK_DEPTH the
-// scoring counts, `ranked` was returned below it, `missed` was not returned.
+// scoring counts, `ranked` was returned below it, `expanded` was not returned
+// but a delivered line's expansion reached it, `missed` was neither.
 // Annotation only: scoreCase() does not read it.
-function annotateRelevant(testCase, returnedIds, ids) {
+export function annotateRelevant(testCase, returnedIds, ids, expanded = new Set()) {
   return (testCase.expect ?? []).map((key) => {
     const at = returnedIds.indexOf(ids.get(key));
     const rank = at === -1 ? null : at + 1;
-    return { record: key, rank, outcome: rank === null ? 'missed' : rank <= RANK_DEPTH ? 'delivered' : 'ranked' };
+    return { record: key, rank, outcome: rank === null ? (expanded.has(ids.get(key)) ? 'expanded' : 'missed') : rank <= RANK_DEPTH ? 'delivered' : 'ranked' };
   });
+}
+
+const sha256 = (text) => createHash('sha256').update(text).digest('hex');
+const signalState = (signals) => Object.fromEntries(Object.entries(signals).map(([name, signal]) => [name, { available: signal.available, matched: signal.matched }]));
+
+// The evaluation's miss ledger (G-5 §6.2-§6.3, the authoritative instrument):
+// one entry per relevant record an engine ranked too low or did not return,
+// with the reason read from its output and the signals it reported -- null for
+// an engine that reports none. A relevant record the default read delivered
+// only because no signal ranked anything is a miss of the ranking too, a
+// fallback recovery (§6.2(a), §9), whatever its position in the working set.
+// The queries are synthetic, so the text is kept.
+export function missesOf(engine, testCase, relevant, signals, fallback = false) {
+  const entry = (record, fields) => ({
+    missId: `${engine}:${testCase.id}:${record}`, source: 'evaluation', evidence: 'grounded_case', engine, case: testCase.id,
+    scope: { project: PROJECT, requestState: 'project_selected' }, query: testCase.query, queryDigest: sha256(testCase.query),
+    record, boundRevision: null, tier: 'T0', signals, unavailableSignals: signals ? Object.keys(signals).filter((name) => !signals[name].available) : null,
+    ...fields
+  });
+  return relevant.flatMap(({ record, rank, outcome }) => {
+    if (fallback && rank !== null) return [entry(record, { evidence: 'fallback_recovery', stage: 'not_ranked', rank: null, reason: 'relevance_not_established' })];
+    if (outcome === 'missed') return [entry(record, { stage: 'not_ranked', rank, reason: 'no_signal_match' })];
+    if (outcome === 'ranked') return [entry(record, { stage: 'ranked_not_delivered', rank, reason: 'ranked_below_depth' })];
+    return [];
+  });
+}
+
+// The default read (PR-26) as an engine: relevance ranked on the records,
+// delivered as compact lines. Each delivered line is expanded (PR-27), and
+// what its investigation reaches is `expanded` for a record not returned.
+export function readDefault(graph, project, query) {
+  const { relevant } = graph.context({ project, query, compact: true });
+  const expanded = new Set();
+  for (const { tier, line } of relevant.items) {
+    if (tier !== 'T1') continue;
+    const { recordId, digest, asOf, derivationVersion, derivedAt, scope } = line.expansion;
+    const reply = graph.expand({ recordId, digest, derivationVersion, derivedAt, ...(asOf ? { asOf } : {}), project: scope.project });
+    for (const pair of reply.investigation?.pairs ?? []) expanded.add(pair.recordId);
+  }
+  return { ids: relevant.items.map((item) => (item.tier === 'T1' ? item.line.recordId : item.record.id)), signals: relevant.relevance.signals, expanded, fallback: !relevant.relevance.established, relevant };
+}
+
+// Fidelity: a phrase missing from a delivered line is a miss of that line
+// (delivered_line_without_decisive_meaning); a record delivered in full keeps
+// every phrase, though one only the fallback delivered is a fallback recovery;
+// a record not delivered at all is a miss of the ranking and loses every
+// phrase. Phrases are matched verbatim.
+export function runFidelity(graph, ids, cases = FIDELITY_CASES) {
+  const results = [];
+  const misses = [];
+  for (const testCase of cases) {
+    const id = ids.get(testCase.record);
+    if (!id) throw new Error(`fidelity case ${testCase.id} names ${testCase.record}, which is not in the corpus`);
+    const answer = readDefault(graph, testCase.project, testCase.query);
+    const at = answer.ids.indexOf(id);
+    const item = at === -1 ? null : answer.relevant.items[at];
+    const text = item?.tier === 'T1' ? item.line.line : null;
+    const lost = item === null ? [...testCase.mustPreserve] : text === null ? [] : testCase.mustPreserve.filter((phrase) => !text.includes(phrase));
+    const fallback = item !== null && answer.fallback;
+    results.push({ case: testCase.id, record: testCase.record, tier: item?.tier ?? null, lost, ...(fallback ? { fallback: true } : {}) });
+    const miss = (fields) => misses.push({
+      missId: `context:${testCase.id}:${testCase.record}`, source: 'evaluation', evidence: 'grounded_case', engine: 'context', case: testCase.id,
+      scope: { project: testCase.project, requestState: 'project_selected' }, query: testCase.query, queryDigest: sha256(testCase.query),
+      record: testCase.record, signals: answer.signals, unavailableSignals: Object.keys(answer.signals).filter((name) => !answer.signals[name].available),
+      lost, ...fields
+    });
+    if (item === null) miss({ boundRevision: null, tier: 'T0', stage: 'not_ranked', rank: null, reason: 'no_signal_match' });
+    else if (fallback) miss({ evidence: 'fallback_recovery', boundRevision: null, tier: 'T0', stage: 'not_ranked', rank: null, reason: 'relevance_not_established' });
+    else if (text !== null && lost.length) miss({ boundRevision: item.line.boundRevision, tier: 'T1', stage: 'delivered_line_without_decisive_meaning', rank: at + 1, reason: 'decisive_meaning_lost' });
+  }
+  return { results, misses };
+}
+
+// EVG-10 (§17.3): whether the semantic signal was populated, read from whether
+// an endpoint is configured (presence only: the evaluation never calls one) and
+// from what the engines themselves reported.
+export function evg10Of(answers, env = process.env) {
+  const semanticAvailable = answers.some((answer) => answer.signals?.semantic.available === true);
+  return {
+    embeddingConfigured: Boolean(env.SHADOWGRAPH_EMBEDDING_URL),
+    semanticAvailable,
+    indexed: Math.max(0, ...answers.map((answer) => answer.indexed ?? 0)),
+    verdict: semanticAvailable ? 'semantic_populated' : 'semantic_not_populated'
+  };
 }
 
 // Recall@k over the expected set, plus reciprocal rank of the first hit, plus a
@@ -242,23 +354,35 @@ export function runEvaluation({ split = 'dev' } = {}) {
   const { graph, ids } = buildGraph();
   const cases = CASES.filter((entry) => entry.split === split);
   groundCases(cases);
+  // Each engine answers with the ids it returned, in order, and -- where it
+  // reports them -- its signals and what a delivered line's expansion reached.
   const engines = {
-    search: (query) => graph.search(query, { project: PROJECT }).items.map((item) => item.id ?? item.record?.id),
-    retrieve: (query) => graph.retrieve(query, { project: PROJECT }).items.map((item) => item.id ?? item.record?.id),
-    recall: (query) => graph.recall(query, { project: PROJECT }).items.map((item) => item.record?.id ?? item.id)
+    search: (query) => ({ ids: graph.search(query, { project: PROJECT }).items.map((item) => item.id ?? item.record?.id) }),
+    retrieve: (query) => ({ ids: graph.retrieve(query, { project: PROJECT }).items.map((item) => item.id ?? item.record?.id) }),
+    recall: (query) => {
+      const result = graph.recall(query, { project: PROJECT });
+      return { ids: result.items.map((item) => item.record?.id ?? item.id), signals: signalState(result.signals), indexed: result.signals.semantic.indexed };
+    },
+    context: (query) => readDefault(graph, PROJECT, query)
   };
 
-  const report = { split, rankDepth: RANK_DEPTH, cases: cases.length, engines: {} };
+  const report = { split, rankDepth: RANK_DEPTH, cases: cases.length, engines: {}, missLedger: [] };
+  const answered = [];
   for (const [name, run] of Object.entries(engines)) {
     const started = performance.now();
-    const returned = cases.map((testCase) => run(testCase.query) ?? []);
+    const answers = cases.map((testCase) => run(testCase.query));
+    const returned = answers.map((answer) => answer.ids ?? []);
     const scored = cases.map((testCase, index) => scoreCase(testCase, returned[index], ids));
     const elapsed = Number((performance.now() - started).toFixed(3));
-    const relevantOutcomes = { delivered: 0, ranked: 0, missed: 0 };
+    const relevantOutcomes = { delivered: 0, ranked: 0, expanded: 0, missed: 0 };
     scored.forEach((result, index) => {
-      result.relevant = annotateRelevant(cases[index], returned[index], ids);
+      result.relevant = annotateRelevant(cases[index], returned[index], ids, answers[index].expanded);
+      if (answers[index].fallback === true) result.fallback = true;
       for (const { outcome } of result.relevant) relevantOutcomes[outcome] += 1;
+      report.missLedger.push(...missesOf(name, cases[index], result.relevant, answers[index].signals ?? null, answers[index].fallback === true));
     });
+    answered.push(...answers);
+    const fallbackAnswered = answers.filter((answer) => answer.fallback === true).length;
 
     const byCategory = {};
     for (const result of scored) {
@@ -281,9 +405,14 @@ export function runEvaluation({ split = 'dev' } = {}) {
       leaks: scored.reduce((sum, result) => sum + result.leaked, 0),
       relevantOutcomes,
       byCategory,
-      cases: scored
+      cases: scored,
+      ...(name === 'context' ? { fallbackAnswered } : {})
     };
   }
+  const fidelity = runFidelity(graph, ids, FIDELITY_CASES.filter((entry) => entry.split === split));
+  report.fidelity = fidelity.results;
+  report.missLedger.push(...fidelity.misses);
+  report.evg10 = evg10Of(answered);
   return report;
 }
 
@@ -301,8 +430,13 @@ function formatReport(report) {
   }
   lines.push('');
   for (const [name, engine] of Object.entries(report.engines)) {
-    lines.push(`${name}: ${engine.passed}/${report.cases} passed, ${engine.leaks} cross-project leaks, ${engine.relevantOutcomes.missed} relevant records missed, ${engine.totalMs} ms`);
+    const fallback = engine.fallbackAnswered ? ` (${engine.fallbackAnswered} answered by the fallback, whose relevant deliveries are recorded misses)` : '';
+    lines.push(`${name}: ${engine.passed}/${report.cases} passed${fallback}, ${engine.leaks} cross-project leaks, ${engine.relevantOutcomes.missed} relevant records missed, ${engine.totalMs} ms`);
   }
+  const delivered = report.fidelity.filter((result) => result.tier === 'T1');
+  lines.push(`fidelity: ${delivered.filter((result) => !result.lost.length).length}/${delivered.length} delivered lines kept their decisive phrases (${report.fidelity.length} cases)`);
+  lines.push(`EVG-10: ${report.evg10.verdict} (endpoint configured: ${report.evg10.embeddingConfigured}, stored vectors: ${report.evg10.indexed})`);
+  lines.push(`miss ledger: ${report.missLedger.length} grounded misses`);
   lines.push('');
   lines.push('paraphrase and crossLanguage are expected to be weak without embeddings.');
   lines.push('They are measured so the limitation is reported, not hidden.');

@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { tokenFree } from '../tools/token-free.js';
 import { spawn } from 'node:child_process';
 import { generateKeyPairSync } from 'node:crypto';
 import { once } from 'node:events';
@@ -10,6 +11,7 @@ import { createJsonFileStore } from '../src/storage.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
 import { createFactAttestation } from '../src/verification.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
+import { privilegedSnapshot } from '../src/internal/snapshot.js';
 
 const BEFORE_BOUNDARY = '2099-08-28T00:00:00.999Z';
 const BOUNDARY = '2099-08-28T00:00:01.000Z';
@@ -157,7 +159,7 @@ async function setupVerifiedMcp(t, backend, label) {
   t.after(async () => { await rpc.stop(); });
   await rpc.call({ jsonrpc: '2.0', id: `${label}-list`, method: 'tools/list' });
   const fact = toolPayload(await rpc.call(toolRequest(`${label}-record`, 'shadowgraph_record_fact', {
-    id: `${label}-${backend}-fact`,
+
     project: label,
     key: 'release-ready',
     value: true,
@@ -171,7 +173,7 @@ async function setupVerifiedMcp(t, backend, label) {
     verifiedAt: BEFORE_BOUNDARY,
     privateKey: fixture.keys.privateKey
   })), 'utf8');
-  const first = toolPayload(await rpc.call(toolRequest(`${label}-verify`, 'shadowgraph_verify_fact', { factId: fact.id, evidencePath })));
+  const first = toolPayload(await rpc.call(toolRequest(`${label}-verify`, 'shadowgraph_verify_fact', { project: fact.project, factId: fact.id, evidencePath })));
   assert.equal(first.operation, 'VERIFIED');
   assert.equal((await loadBackend(backend, file)).revision, 2);
   return { backend, file, fixture, faultFile, env, rpc, fact, evidencePath };
@@ -188,28 +190,28 @@ function committedExpirationFixture() {
   };
   const graph = shadowgraph.createShadowGraph({ verifier, now: () => clock.value });
   const fact = graph.addFact({
-    id: attestation.factId,
     project: 'mcp-committed-expiration',
     key: 'release-ready',
     value: true,
     expiresAt: BOUNDARY
   });
+  attestation.factId = fact.id;
   return { graph, fact, clock };
 }
 
 test('committed expiration rejection is tagged for persistence adapters', async () => {
   const { graph, fact, clock } = committedExpirationFixture();
-  await graph.verifyFact({ factId: fact.id, evidencePath: 'controlled-evidence.json' });
+  await graph.verifyFact({ project: fact.project, factId: fact.id, evidencePath: 'controlled-evidence.json' });
   clock.value = BOUNDARY;
 
-  const error = await graph.verifyFact({ factId: fact.id, evidencePath: 'controlled-evidence.json' })
+  const error = await graph.verifyFact({ project: fact.project, factId: fact.id, evidencePath: 'controlled-evidence.json' })
     .then(() => null, (reason) => reason);
 
   assert.equal(typeof shadowgraph.isCommittedRejection, 'function');
   assert.equal(shadowgraph.isCommittedRejection(error), true);
   assert.match(error.message, /invalid or expired persisted fact verification/i);
-  assert.equal(graph.exportData().facts[0].verificationStatus, 'expired');
-  assert.equal(graph.exportData().journal.at(-1).type, 'fact.expired');
+  assert.equal(privilegedSnapshot(graph).facts[0].verificationStatus, 'expired');
+  assert.equal(privilegedSnapshot(graph).journal.at(-1).type, 'fact.expired');
 });
 
 test('MCP JSON persists a committed expiration before returning the legacy verification rejection', async (t) => {
@@ -226,7 +228,7 @@ test('MCP JSON persists a committed expiration before returning the legacy verif
   await rpc.call({ jsonrpc: '2.0', id: 1, method: 'tools/list' });
 
   const fact = toolPayload(await rpc.call(toolRequest(2, 'shadowgraph_record_fact', {
-    id: 'mcp-json-committed-expiration',
+
     project: 'mcp-committed-expiration',
     key: 'release-ready',
     value: true,
@@ -241,7 +243,7 @@ test('MCP JSON persists a committed expiration before returning the legacy verif
     privateKey: fixture.keys.privateKey
   })), 'utf8');
 
-  const first = toolPayload(await rpc.call(toolRequest(3, 'shadowgraph_verify_fact', { factId: fact.id, evidencePath })));
+  const first = toolPayload(await rpc.call(toolRequest(3, 'shadowgraph_verify_fact', { project: fact.project, factId: fact.id, evidencePath })));
   assert.equal(first.operation, 'VERIFIED');
   assert.equal(first.fact.verificationStatus, 'verified');
   const verifiedDurable = await loadJson(file);
@@ -250,12 +252,12 @@ test('MCP JSON persists a committed expiration before returning the legacy verif
   assert.equal(verifiedDurable.journal.at(-1).type, 'fact.verified');
 
   await writeFile(fixture.clockFile, BOUNDARY, 'utf8');
-  const retry = await rpc.call(toolRequest(4, 'shadowgraph_verify_fact', { factId: fact.id, evidencePath }));
+  const retry = await rpc.call(toolRequest(4, 'shadowgraph_verify_fact', { project: fact.project, factId: fact.id, evidencePath }));
   assertPrivateLegacyToolFailure(retry, {
     forbidden: [fact.id, evidencePath, 'invalid or expired persisted fact verification']
   });
 
-  const liveJournal = toolPayload(await rpc.call(toolRequest(5, 'shadowgraph_journal', { limit: 100 })));
+  const liveJournal = toolPayload(await rpc.call(toolRequest(5, 'shadowgraph_journal', { project: fact.project, limit: 100 })));
   assert.equal(liveJournal.items.at(-1).type, 'fact.expired');
   assert.equal(liveJournal.items.at(-1).payload.status, 'expired');
   assert.equal(liveJournal.items.at(-1).payload.verificationStatus, 'expired');
@@ -275,12 +277,12 @@ test('MCP JSON persists a committed expiration before returning the legacy verif
     SHADOWGRAPH_TEST_CLOCK_FILE: fixture.clockFile
   });
   await rpc.call({ jsonrpc: '2.0', id: 6, method: 'tools/list' });
-  const rebuilt = toolPayload(await rpc.call(toolRequest(7, 'shadowgraph_rebuild')));
+  const rebuilt = toolPayload(await rpc.call(toolRequest(7, 'shadowgraph_rebuild', { project: fact.project })));
   assert.equal(rebuilt.rebuildable, true);
   const rebuiltFact = rebuilt.projection.facts.find((item) => item.id === fact.id);
   assert.equal(rebuiltFact.status, 'expired');
   assert.equal(rebuiltFact.verificationStatus, 'expired');
-  assert.deepEqual(rebuiltFact, durable.facts[0]);
+  assert.deepEqual(rebuiltFact, tokenFree(durable.facts[0]));
   const recall = toolPayload(await rpc.call(toolRequest(8, 'shadowgraph_recall', {
     project: fact.project,
     query: 'release ready'
@@ -311,7 +313,7 @@ test('MCP SQLite persists a committed expiration with JSON-equivalent restart an
   await rpc.call({ jsonrpc: '2.0', id: 20, method: 'tools/list' });
 
   const fact = toolPayload(await rpc.call(toolRequest(21, 'shadowgraph_record_fact', {
-    id: 'mcp-sqlite-committed-expiration',
+
     project: 'mcp-committed-expiration',
     key: 'release-ready',
     value: true,
@@ -326,7 +328,7 @@ test('MCP SQLite persists a committed expiration with JSON-equivalent restart an
     privateKey: fixture.keys.privateKey
   })), 'utf8');
 
-  const first = toolPayload(await rpc.call(toolRequest(22, 'shadowgraph_verify_fact', { factId: fact.id, evidencePath })));
+  const first = toolPayload(await rpc.call(toolRequest(22, 'shadowgraph_verify_fact', { project: fact.project, factId: fact.id, evidencePath })));
   assert.equal(first.operation, 'VERIFIED');
   assert.equal(first.fact.verificationStatus, 'verified');
   const verifiedDurable = await loadSqlite(file);
@@ -335,12 +337,12 @@ test('MCP SQLite persists a committed expiration with JSON-equivalent restart an
   assert.equal(verifiedDurable.journal.at(-1).type, 'fact.verified');
 
   await writeFile(fixture.clockFile, BOUNDARY, 'utf8');
-  const retry = await rpc.call(toolRequest(23, 'shadowgraph_verify_fact', { factId: fact.id, evidencePath }));
+  const retry = await rpc.call(toolRequest(23, 'shadowgraph_verify_fact', { project: fact.project, factId: fact.id, evidencePath }));
   assertPrivateLegacyToolFailure(retry, {
     forbidden: [fact.id, evidencePath, 'invalid or expired persisted fact verification']
   });
 
-  const liveJournal = toolPayload(await rpc.call(toolRequest(24, 'shadowgraph_journal', { limit: 100 })));
+  const liveJournal = toolPayload(await rpc.call(toolRequest(24, 'shadowgraph_journal', { project: fact.project, limit: 100 })));
   assert.equal(liveJournal.items.at(-1).type, 'fact.expired');
   assert.equal(liveJournal.items.at(-1).payload.verificationStatus, 'expired');
   const durable = await loadSqlite(file);
@@ -353,10 +355,10 @@ test('MCP SQLite persists a committed expiration with JSON-equivalent restart an
   await rpc.stop();
   rpc = startMcp(file, env);
   await rpc.call({ jsonrpc: '2.0', id: 25, method: 'tools/list' });
-  const rebuilt = toolPayload(await rpc.call(toolRequest(26, 'shadowgraph_rebuild')));
+  const rebuilt = toolPayload(await rpc.call(toolRequest(26, 'shadowgraph_rebuild', { project: fact.project })));
   assert.equal(rebuilt.rebuildable, true);
   const rebuiltFact = rebuilt.projection.facts.find((item) => item.id === fact.id);
-  assert.deepEqual(rebuiltFact, durable.facts[0]);
+  assert.deepEqual(rebuiltFact, tokenFree(durable.facts[0]));
   assert.equal(rebuiltFact.status, 'expired');
   assert.equal(rebuiltFact.verificationStatus, 'expired');
   const recall = toolPayload(await rpc.call(toolRequest(27, 'shadowgraph_recall', {
@@ -372,6 +374,7 @@ test('MCP JSON fails closed and latches after committed expiration persistence f
   await writeFile(scenario.fixture.clockFile, BOUNDARY, 'utf8');
 
   const retry = await scenario.rpc.call(toolRequest('precommit-retry', 'shadowgraph_verify_fact', {
+    project: scenario.fact.project,
     factId: scenario.fact.id,
     evidencePath: scenario.evidencePath
   }));
@@ -388,7 +391,7 @@ test('MCP JSON fails closed and latches after committed expiration persistence f
   const blockedRead = await scenario.rpc.call(toolRequest('precommit-blocked-read', 'shadowgraph_journal', { limit: 100 }));
   assert.equal(blockedRead.error.code, -32001);
   const blockedWrite = await scenario.rpc.call(toolRequest('precommit-blocked-write', 'shadowgraph_record_decision', {
-    id: 'must-not-land', title: 'Must not land', chosen: 'blocked'
+     title: 'Must not land', chosen: 'blocked'
   }));
   assert.equal(blockedWrite.error.code, -32001);
   assert.equal((await loadJson(scenario.file)).revision, 2);
@@ -401,6 +404,7 @@ test('MCP SQLite fails closed and latches after committed expiration persistence
   await writeFile(scenario.fixture.clockFile, BOUNDARY, 'utf8');
 
   const retry = await scenario.rpc.call(toolRequest('sqlite-precommit-retry', 'shadowgraph_verify_fact', {
+    project: scenario.fact.project,
     factId: scenario.fact.id,
     evidencePath: scenario.evidencePath
   }));
@@ -426,6 +430,7 @@ for (const backend of ['json', 'sqlite']) {
     await writeFile(scenario.fixture.clockFile, BOUNDARY, 'utf8');
 
     const retry = await scenario.rpc.call(toolRequest(`${backend}-postcommit-retry`, 'shadowgraph_verify_fact', {
+      project: scenario.fact.project,
       factId: scenario.fact.id,
       evidencePath: scenario.evidencePath
     }));
@@ -434,7 +439,7 @@ for (const backend of ['json', 'sqlite']) {
     });
     assert.equal(await readFile(scenario.faultFile, 'utf8'), 'triggered:afterCommit');
 
-    const liveJournal = toolPayload(await scenario.rpc.call(toolRequest(`${backend}-postcommit-journal`, 'shadowgraph_journal', { limit: 100 })));
+    const liveJournal = toolPayload(await scenario.rpc.call(toolRequest(`${backend}-postcommit-journal`, 'shadowgraph_journal', { project: scenario.fact.project, limit: 100 })));
     assert.equal(liveJournal.items.at(-1).type, 'fact.expired');
     const committed = await loadBackend(backend, scenario.file);
     assert.equal(committed.revision, 3);
@@ -443,12 +448,12 @@ for (const backend of ['json', 'sqlite']) {
     assert.equal(committed.journal.at(-1).type, 'fact.expired');
 
     const later = toolPayload(await scenario.rpc.call(toolRequest(`${backend}-postcommit-later`, 'shadowgraph_record_decision', {
-      id: `${backend}-later-decision`,
+
       project: 'later-operations',
       title: 'Later operation',
       chosen: 'queue and revision remain usable'
     })));
-    assert.equal(later.id, `${backend}-later-decision`);
+    assert.equal(typeof later.id === 'string' && later.id.length > 0, true);
     const afterLater = await loadBackend(backend, scenario.file);
     assert.equal(afterLater.revision, 4, 'read-back must advance the live expected revision before the later save');
     assert.equal(afterLater.records.some((record) => record.id === later.id), true);
@@ -465,12 +470,12 @@ for (const backend of ['json', 'sqlite']) {
     t.after(async () => { await writer.stop(); });
     await writer.call({ jsonrpc: '2.0', id: `${backend}-writer-list`, method: 'tools/list' });
     const independent = toolPayload(await writer.call(toolRequest(`${backend}-writer-save`, 'shadowgraph_record_decision', {
-      id: `${backend}-independent-winner`,
+
       project: 'independent-writer',
       title: 'Independent writer wins',
       chosen: 'preserve its committed revision'
     })));
-    assert.equal(independent.id, `${backend}-independent-winner`);
+    assert.equal(typeof independent.id === 'string' && independent.id.length > 0, true);
     await writer.stop();
     const afterWriter = await loadBackend(backend, scenario.file);
     assert.equal(afterWriter.revision, 3);
@@ -478,6 +483,7 @@ for (const backend of ['json', 'sqlite']) {
 
     await writeFile(scenario.fixture.clockFile, BOUNDARY, 'utf8');
     const retry = await scenario.rpc.call(toolRequest(`${backend}-conflict-retry`, 'shadowgraph_verify_fact', {
+      project: scenario.fact.project,
       factId: scenario.fact.id,
       evidencePath: scenario.evidencePath
     }));
@@ -515,7 +521,7 @@ for (const backend of ['json', 'sqlite']) {
       forbidden: [scenario.fact.id, 'expirationDurable', 'persistenceError', 'revision conflict']
     });
     const blockedWrite = await scenario.rpc.call(toolRequest(`${backend}-conflict-blocked-write`, 'shadowgraph_record_decision', {
-      id: `${backend}-blocked-after-conflict`, title: 'Blocked', chosen: 'must not persist'
+       title: 'Blocked', chosen: 'must not persist'
     }));
     assertPrivateLegacyToolFailure(blockedWrite, {
       code: -32001,

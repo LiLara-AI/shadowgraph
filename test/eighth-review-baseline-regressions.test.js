@@ -17,6 +17,7 @@ import { createSqliteStore } from '../src/sqlite-storage.js';
 import { createJsonFileStore } from '../src/storage.js';
 import { createFactAttestation, createLocalEvidenceVerifier } from '../src/verification.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
+import { privilegedRebuild, privilegedSnapshot } from '../src/internal/snapshot.js';
 
 const NOW = '2026-08-27T12:00:00.000Z';
 const EXPIRES_AT = '2026-09-30T00:00:00.000Z';
@@ -43,21 +44,19 @@ async function signedMidstreamBaselineAttack(directory, fixture, terminal, suffi
   const clock = { value: NOW };
   const graph = createShadowGraph({ verifier: fixture.verifier, now: () => clock.value });
   const decision = graph.addDecision({
-    id: `ds-p1-006-decision-${suffix}`,
     project: 'ds-p1-006',
     title: `DS-P1-006 ${terminal} relation host`,
     chosen: 'preserve lifecycle'
   });
   const fact = graph.addFact({
-    id: `ds-p1-006-fact-${suffix}`,
     project: 'ds-p1-006',
     key: `signed-${suffix}`,
     value: { signed: true, terminal },
     expiresAt: EXPIRES_AT,
     idempotencyKey: `retry-${suffix}`
   });
-  graph.link({
-    id: `ds-p1-006-relation-${suffix}`,
+  const relation = graph.link({
+    project: 'ds-p1-006',
     from: decision.id,
     to: fact.id,
     relation: 'depends_on'
@@ -70,17 +69,16 @@ async function signedMidstreamBaselineAttack(directory, fixture, terminal, suffi
     verifiedAt: '2026-08-27T12:05:00.000Z',
     privateKey: fixture.keys.privateKey
   })), 'utf8');
-  await graph.verifyFact({ factId: fact.id, evidencePath });
-  const copiedActive = graph.exportData();
+  await graph.verifyFact({ project: fact.project, factId: fact.id, evidencePath });
+  const copiedActive = privilegedSnapshot(graph);
   const copiedFact = structuredClone(copiedActive.facts.find((item) => item.id === fact.id));
   assert.equal(copiedFact.verificationStatus, 'verified');
 
   if (terminal === 'expired') {
     clock.value = '2026-10-01T00:00:00.000Z';
-    graph.maintain({ now: clock.value });
+    graph.maintain({ project: fact.project, now: clock.value });
   } else {
     graph.addFact({
-      id: `ds-p1-006-replacement-${suffix}`,
       project: fact.project,
       key: fact.key,
       value: { replacement: true },
@@ -90,7 +88,7 @@ async function signedMidstreamBaselineAttack(directory, fixture, terminal, suffi
     });
   }
 
-  const terminalPayload = graph.exportData();
+  const terminalPayload = privilegedSnapshot(graph);
   const terminalFact = terminalPayload.facts.find((item) => item.id === fact.id);
   assert.equal(terminalFact.status, terminal);
   assert.deepEqual(terminalFact.verification, copiedFact.verification, 'the genuine copied signature survives the terminal transition');
@@ -120,7 +118,7 @@ async function signedMidstreamBaselineAttack(directory, fixture, terminal, suffi
   terminalPayload.facts = structuredClone(baseline.payload.facts);
   terminalPayload.relations = structuredClone(baseline.payload.relations);
   terminalPayload.idempotency = structuredClone(baseline.payload.idempotency);
-  return { payload: terminalPayload, legitimateTerminalPayload, factId: fact.id, relationId: `ds-p1-006-relation-${suffix}` };
+  return { payload: terminalPayload, legitimateTerminalPayload, factId: fact.id, relationId: relation.id };
 }
 
 function assertPlacementError(action, label) {
@@ -155,7 +153,7 @@ function baselineOnlyPayload(schemaVersion = 5, suffix = String(schemaVersion)) 
       confidence: 0.5
     }]
   });
-  return graph.exportData();
+  return privilegedSnapshot(graph);
 }
 
 function placementVariants() {
@@ -167,8 +165,8 @@ function placementVariants() {
   duplicate.journalSeq = duplicateEntry.seq;
 
   const midstreamGraph = createShadowGraph({ now: () => NOW });
-  midstreamGraph.addDecision({ id: 'ds-p1-006-midstream-existing', title: 'Existing', chosen: 'keep' });
-  const midstream = midstreamGraph.exportData();
+  midstreamGraph.addDecision({ project: 'default', title: 'Existing', chosen: 'keep' });
+  const midstream = privilegedSnapshot(midstreamGraph);
   const midstreamEntry = structuredClone(baselineOnlyPayload(5, 'midstream').journal[0]);
   midstreamEntry.id = 'ds-p1-006-midstream-baseline';
   midstreamEntry.seq = 2;
@@ -199,8 +197,8 @@ async function writePayload(path, payload) {
 
 function oldPayload(suffix) {
   const graph = createShadowGraph({ now: () => NOW });
-  graph.addDecision({ id: `ds-p1-006-old-${suffix}`, project: 'old', title: `OLD ${suffix}`, chosen: 'preserve' });
-  return graph.exportData();
+  graph.addDecision({ project: 'old', title: `OLD ${suffix}`, chosen: 'preserve' });
+  return privilegedSnapshot(graph);
 }
 
 function runCli(file, source) {
@@ -299,15 +297,15 @@ test('DS-P1-006 eighth review: matching-live midstream baselines cannot resurrec
     for (const verifier of [fixture.verifier, null]) {
       const label = `${terminal}/${verifier ? 'verifier' : 'no-verifier'}`;
       const target = createShadowGraph({ verifier, now: () => NOW });
-      const before = target.exportData();
+      const before = privilegedSnapshot(target);
       assertPlacementError(() => target.importData(attack.payload), `${label} import`);
-      assert.deepEqual(target.exportData(), before, `${label}: failed merge import is atomic`);
+      assert.deepEqual(privilegedSnapshot(target), before, `${label}: failed merge import is atomic`);
 
       const replacement = createShadowGraph({ verifier, now: () => NOW });
-      replacement.addDecision({ id: `ds-p1-006-replace-old-${terminal}-${verifier ? 'v' : 'nv'}`, title: 'OLD', chosen: 'preserve' });
-      const replacementBefore = replacement.exportData();
+      replacement.addDecision({ project: 'default', title: 'OLD', chosen: 'preserve' });
+      const replacementBefore = privilegedSnapshot(replacement);
       assertPlacementError(() => replacement.replaceData(attack.payload), `${label} replace`);
-      assert.deepEqual(replacement.exportData(), replacementBefore, `${label}: failed replacement is atomic`);
+      assert.deepEqual(privilegedSnapshot(replacement), replacementBefore, `${label}: failed replacement is atomic`);
 
       assertPlacementError(
         () => createRestoreValidator({ verifier, now: () => NOW })(attack.payload),
@@ -329,15 +327,15 @@ test('DS-P1-006 eighth review: duplicate, midstream, rewind, and wrong-epoch bas
     assert.ok(report.skipped.some((entry) => entry.placement === expectedPlacement.get(label)), `${label}: classified placement`);
 
     const target = createShadowGraph({ now: () => NOW });
-    const before = target.exportData();
+    const before = privilegedSnapshot(target);
     assertPlacementError(() => target.importData(payload), `${label} import`);
-    assert.deepEqual(target.exportData(), before, `${label}: import destination unchanged`);
+    assert.deepEqual(privilegedSnapshot(target), before, `${label}: import destination unchanged`);
 
     const replacement = createShadowGraph({ now: () => NOW });
-    replacement.addDecision({ id: `ds-p1-006-${label.replaceAll(' ', '-')}-old`, title: 'OLD', chosen: 'preserve' });
-    const replacementBefore = replacement.exportData();
+    replacement.addDecision({ project: 'default', title: 'OLD', chosen: 'preserve' });
+    const replacementBefore = privilegedSnapshot(replacement);
     assertPlacementError(() => replacement.replaceData(payload), `${label} replace`);
-    assert.deepEqual(replacement.exportData(), replacementBefore, `${label}: replace destination unchanged`);
+    assert.deepEqual(privilegedSnapshot(replacement), replacementBefore, `${label}: replace destination unchanged`);
 
     assertPlacementError(() => validateRestorePayload(payload, { now: () => NOW }), `${label} restore payload`);
   }
@@ -358,10 +356,10 @@ test('DS-P1-006 eighth review: schema 1-5 and baseline-only migrations remain ca
       assert.doesNotThrow(() => validateRestorePayload(payload, { now: () => NOW }));
       const graph = createShadowGraph({ now: () => NOW });
       graph.importData(payload);
-      const report = graph.rebuild();
+      const report = privilegedRebuild(graph);
       assert.equal(report.rebuildable, true, `schema ${schemaVersion} restart ${restart}: rebuildable`);
-      assert.deepEqual(report.projection.records, graph.exportData().records, `schema ${schemaVersion} restart ${restart}: projection parity`);
-      payload = graph.exportData();
+      assert.deepEqual(report.projection.records, privilegedSnapshot(graph).records, `schema ${schemaVersion} restart ${restart}: projection parity`);
+      payload = privilegedSnapshot(graph);
     }
   }
 });
@@ -399,14 +397,14 @@ test('DS-P1-006 eighth review: baseline-only signed snapshots preserve verifier 
 
   const configured = createShadowGraph({ verifier: fixture.verifier, now: () => NOW });
   configured.importData(baselineOnly);
-  assert.equal(configured.exportData().facts[0].verificationStatus, 'verified');
-  assert.equal(configured.rebuild().projection.facts[0].verificationStatus, 'verified');
+  assert.equal(privilegedSnapshot(configured).facts[0].verificationStatus, 'verified');
+  assert.equal(privilegedRebuild(configured).projection.facts[0].verificationStatus, 'verified');
 
   const unconfigured = createShadowGraph({ now: () => NOW });
   unconfigured.importData(baselineOnly);
-  assert.equal(unconfigured.exportData().facts[0].verificationStatus, 'unverified');
-  assert.equal(unconfigured.exportData().facts[0].verificationUntrustedReason, 'verifier_not_configured');
-  assert.equal(unconfigured.rebuild().projection.facts[0].verificationStatus, 'unverified');
+  assert.equal(privilegedSnapshot(unconfigured).facts[0].verificationStatus, 'unverified');
+  assert.equal(privilegedSnapshot(unconfigured).facts[0].verificationUntrustedReason, 'verifier_not_configured');
+  assert.equal(privilegedRebuild(unconfigured).projection.facts[0].verificationStatus, 'unverified');
 });
 
 test('DS-P1-006 eighth review: a monotonic migration extension preserves the signed terminal lifecycle and original replay epoch', async (t) => {
@@ -416,8 +414,8 @@ test('DS-P1-006 eighth review: a monotonic migration extension preserves the sig
     const source = await signedMidstreamBaselineAttack(directory, fixture, terminal, `migration-extension-${terminal}`);
     const graph = createShadowGraph({ verifier: fixture.verifier, now: () => NOW });
     graph.importData(source.legitimateTerminalPayload);
-    const originalEpoch = graph.exportData().journalEpoch;
-    const originalFirstSequence = Math.min(...graph.exportData().journal.filter((entry) => entry.replayable !== false).map((entry) => entry.seq));
+    const originalEpoch = privilegedSnapshot(graph).journalEpoch;
+    const originalFirstSequence = Math.min(...privilegedSnapshot(graph).journal.filter((entry) => entry.replayable !== false).map((entry) => entry.seq));
 
     graph.importData({
       schemaVersion: 3,
@@ -434,9 +432,9 @@ test('DS-P1-006 eighth review: a monotonic migration extension preserves the sig
       }]
     });
 
-    const exported = graph.exportData();
+    const exported = privilegedSnapshot(graph);
     assert.equal(exported.journalEpoch, originalEpoch, `${terminal}: migration cannot advance the replay boundary`);
-    const report = graph.rebuild();
+    const report = privilegedRebuild(graph);
     assert.equal(report.rebuildable, true, `${terminal}: the proven extension remains rebuildable`);
     assert.equal(report.replayedFrom, originalFirstSequence, `${terminal}: prior replay history remains in range`);
     assert.equal(report.projection.facts.find((fact) => fact.id === source.factId).status, terminal);
@@ -447,31 +445,31 @@ test('DS-P1-006 eighth review: a monotonic migration extension preserves the sig
 test('DS-P1-006 journal-less merge appends typed decision, attempt, fact, relation, and idempotency snapshots', () => {
   const graph = createShadowGraph({ now: () => NOW });
   const decision = graph.addDecision({
-    id: 'ds-p1-006-merge-decision', project: 'ds-p1-006-merge',
+    project: 'ds-p1-006-merge',
     title: 'Old private decision', chosen: 'preserve', idempotencyKey: 'move-retry'
   });
   const retryTarget = graph.addDecision({
-    id: 'ds-p1-006-retry-target', project: 'ds-p1-006-merge',
+    project: 'ds-p1-006-merge',
     title: 'Retry target', chosen: 'canonical'
   });
   const attempt = graph.addAttempt({
-    id: 'ds-p1-006-merge-attempt', project: 'ds-p1-006-merge',
+    project: 'ds-p1-006-merge',
     solution: 'old private attempt', result: 'failed'
   });
   const fact = graph.addFact({
-    id: 'ds-p1-006-merge-fact', project: 'ds-p1-006-merge', key: 'mode',
+    project: 'ds-p1-006-merge', key: 'mode',
     value: 'old-private-fact', idempotencyKey: 'fact-retry'
   });
   const relation = graph.link({
-    id: 'ds-p1-006-merge-relation', from: decision.id, to: fact.id,
+    project: 'ds-p1-006-merge', from: decision.id, to: fact.id,
     relation: 'depends_on'
   });
   const replacementSource = createShadowGraph({ now: () => '2026-09-01T00:00:00.000Z' });
   const replacement = replacementSource.addFact({
-    id: 'ds-p1-006-merge-fact-next', project: 'ds-p1-006-merge', key: 'mode',
+    project: 'ds-p1-006-merge', key: 'mode',
     value: 'safe-current-fact', validFrom: '2026-09-01T00:00:00.000Z'
   });
-  const before = graph.exportData();
+  const before = privilegedSnapshot(graph);
 
   graph.importData({
     schemaVersion: 5,
@@ -500,7 +498,7 @@ test('DS-P1-006 journal-less merge appends typed decision, attempt, fact, relati
     idempotency: [{ key: 'decision:ds-p1-006-merge:move-retry', value: retryTarget }]
   });
 
-  const after = graph.exportData();
+  const after = privilegedSnapshot(graph);
   assert.equal(after.journalEpoch, before.journalEpoch, 'merge preserves the original replay epoch');
   assert.deepEqual(after.journal.slice(0, before.journal.length), before.journal, 'old journal entries remain byte-for-byte values');
   const appended = after.journal.slice(before.journal.length);
@@ -513,7 +511,7 @@ test('DS-P1-006 journal-less merge appends typed decision, attempt, fact, relati
   assert.equal(appended.at(-1).idempotencyKey, 'decision:ds-p1-006-merge:move-retry');
   assert.deepEqual(appended.map((entry) => entry.seq), [6, 7, 8, 9, 10, 11]);
 
-  const report = graph.rebuild();
+  const report = privilegedRebuild(graph);
   assert.equal(report.rebuildable, true, report.reason);
   const liveById = new Map([...after.records, ...after.facts, ...after.relations].map((item) => [item.id, item]));
   const rebuiltById = new Map([...report.projection.records, ...report.projection.facts, ...report.projection.relations].map((item) => [item.id, item]));
@@ -527,18 +525,18 @@ test('DS-P1-006 journal-less merge appends typed decision, attempt, fact, relati
 test('DS-P1-006 journal-less multi-memory overwrite uses recorded, superseded, and invalidated snapshots', () => {
   const graph = createShadowGraph({ now: () => NOW });
   const active = graph.remember({
-    id: 'ds-p1-006-memory-active', project: 'ds-p1-006-memory', memoryType: 'profile',
+    project: 'ds-p1-006-memory', memoryType: 'profile',
     key: 'active', text: 'old-active-private', idempotencyKey: 'active-retry'
   }).memory;
   const superseded = graph.remember({
-    id: 'ds-p1-006-memory-superseded', project: 'ds-p1-006-memory', memoryType: 'note',
+    project: 'ds-p1-006-memory', memoryType: 'note',
     key: 'superseded', text: 'old-superseded-private'
   }).memory;
   const invalidated = graph.remember({
-    id: 'ds-p1-006-memory-invalidated', project: 'ds-p1-006-memory', memoryType: 'goal',
+    project: 'ds-p1-006-memory', memoryType: 'goal',
     key: 'invalidated', text: 'old-invalidated-private'
   }).memory;
-  const before = graph.exportData();
+  const before = privilegedSnapshot(graph);
 
   graph.importData({
     schemaVersion: 5,
@@ -546,7 +544,7 @@ test('DS-P1-006 journal-less multi-memory overwrite uses recorded, superseded, a
       { ...active, text: 'sanitized-active', updatedAt: '2026-09-01T00:00:00.000Z' },
       {
         ...superseded, text: 'sanitized-superseded', status: 'superseded',
-        supersededBy: 'ds-p1-006-memory-active',
+        supersededBy: active.id,
         temporal: { ...superseded.temporal, validTo: '2026-09-01T00:00:00.000Z', invalidatedAt: '2026-09-01T00:00:00.000Z' }
       },
       {
@@ -556,7 +554,7 @@ test('DS-P1-006 journal-less multi-memory overwrite uses recorded, superseded, a
     ]
   });
 
-  const after = graph.exportData();
+  const after = privilegedSnapshot(graph);
   const appended = after.journal.slice(before.journal.length);
   assert.deepEqual(appended.map((entry) => entry.type), [
     'memory.recorded', 'memory.superseded', 'memory.invalidated'
@@ -565,7 +563,7 @@ test('DS-P1-006 journal-less multi-memory overwrite uses recorded, superseded, a
   assert.equal(after.journalEpoch, before.journalEpoch);
   assert.deepEqual(after.journal.slice(0, before.journal.length), before.journal);
 
-  const report = graph.rebuild();
+  const report = privilegedRebuild(graph);
   assert.equal(report.rebuildable, true, report.reason);
   assert.deepEqual(
     new Map(report.projection.records.map((item) => [item.id, item])),
@@ -582,7 +580,7 @@ test('DS-P1-006 journal-less merge rejects terminal verified fact resurrection a
     const attack = await signedMidstreamBaselineAttack(directory, fixture, terminal, `journal-less-${terminal}`);
     const graph = createShadowGraph({ verifier: fixture.verifier, now: () => NOW });
     graph.importData(attack.legitimateTerminalPayload);
-    const before = graph.exportData();
+    const before = privilegedSnapshot(graph);
     const resurrected = attack.payload.facts.find((fact) => fact.id === attack.factId);
     assert.equal(resurrected.status, 'active');
     assert.equal(resurrected.verificationStatus, 'verified');
@@ -592,18 +590,18 @@ test('DS-P1-006 journal-less merge rejects terminal verified fact resurrection a
       /terminal (?:expired|superseded) fact cannot transition back|fact lifecycle is non-monotonic/i,
       terminal
     );
-    assert.deepEqual(graph.exportData(), before, `${terminal}: failed merge leaves every live collection and journal byte-for-byte values`);
+    assert.deepEqual(privilegedSnapshot(graph), before, `${terminal}: failed merge leaves every live collection and journal byte-for-byte values`);
   }
 });
 
 test('DS-P1-006 journal-less merge preflights sequence overflow and snapshot postconditions before mutation', () => {
   const overflow = createShadowGraph({ now: () => NOW });
   const overflowDecision = overflow.addDecision({
-    id: 'ds-p1-006-overflow-decision', project: 'ds-p1-006-overflow',
+    project: 'ds-p1-006-overflow',
     title: 'Overflow original', chosen: 'preserve'
   });
   overflow.importData({ schemaVersion: 5, journal: [], journalSeq: Number.MAX_SAFE_INTEGER });
-  const overflowBefore = overflow.exportData();
+  const overflowBefore = privilegedSnapshot(overflow);
   assert.throws(
     () => overflow.importData({
       schemaVersion: 5,
@@ -611,18 +609,18 @@ test('DS-P1-006 journal-less merge preflights sequence overflow and snapshot pos
     }),
     /journal sequence overflow/i
   );
-  assert.deepEqual(overflow.exportData(), overflowBefore);
+  assert.deepEqual(privilegedSnapshot(overflow), overflowBefore);
 
   const postcondition = createShadowGraph({ now: () => NOW });
   const decision = postcondition.addDecision({
-    id: 'ds-p1-006-postcondition-decision', project: 'ds-p1-006-postcondition',
+    project: 'ds-p1-006-postcondition',
     title: 'Postcondition original', chosen: 'preserve'
   });
   const fact = postcondition.addFact({
-    id: 'ds-p1-006-postcondition-fact', project: 'ds-p1-006-postcondition',
+    project: 'ds-p1-006-postcondition',
     key: 'expiry', value: 'active'
   });
-  const postconditionBefore = postcondition.exportData();
+  const postconditionBefore = privilegedSnapshot(postcondition);
   assert.throws(
     () => postcondition.importData({
       schemaVersion: 4,
@@ -638,14 +636,14 @@ test('DS-P1-006 journal-less merge preflights sequence overflow and snapshot pos
     }),
     /fact\.expired postcondition failed|effective expiration/i
   );
-  assert.deepEqual(postcondition.exportData(), postconditionBefore);
+  assert.deepEqual(privilegedSnapshot(postcondition), postconditionBefore);
 });
 
 test('DS-P1-006 journal-less overwrite survives JSON and SQLite restart with rebuild parity', async (t) => {
   const directory = await scratchDirectory(t, 'shadowgraph-ds-p1-006-journal-less-restart-');
   const graph = createShadowGraph({ now: () => NOW });
   const memory = graph.remember({
-    id: 'ds-p1-006-restart-memory', project: 'ds-p1-006-restart',
+    project: 'ds-p1-006-restart',
     memoryType: 'profile', key: 'secret', text: 'restart-old-private',
     idempotencyKey: 'restart-retry'
   }).memory;
@@ -662,7 +660,7 @@ test('DS-P1-006 journal-less overwrite survives JSON and SQLite restart with reb
       }
     }]
   });
-  const merged = graph.exportData();
+  const merged = privilegedSnapshot(graph);
   assert.deepEqual(merged.journal.map((entry) => entry.type), ['memory.recorded', 'memory.invalidated']);
 
   for (const backend of ['json', 'sqlite']) {
@@ -679,8 +677,8 @@ test('DS-P1-006 journal-less overwrite survives JSON and SQLite restart with reb
 
       const restarted = createShadowGraph({ now: () => NOW });
       restarted.importData(durable);
-      const report = restarted.rebuild();
-      const exported = restarted.exportData();
+      const report = privilegedRebuild(restarted);
+      const exported = privilegedSnapshot(restarted);
       assert.equal(report.rebuildable, true, `${backend}: ${report.reason}`);
       assert.deepEqual(report.projection.records, exported.records, `${backend}: records rebuild exactly`);
       assert.deepEqual(report.projection.idempotency, exported.idempotency, `${backend}: idempotency rebuilds exactly`);
@@ -692,17 +690,17 @@ test('DS-P1-006 journal-less overwrite survives JSON and SQLite restart with reb
 
 test('DS-P1-006 eighth review: hard-purge leading gaps and sequence ledgers remain valid without a baseline', () => {
   const graph = createShadowGraph({ now: () => NOW });
-  graph.addDecision({ id: 'ds-p1-006-hard-gone', project: 'gone', title: 'Gone', chosen: 'erase' });
-  graph.addDecision({ id: 'ds-p1-006-hard-kept', project: 'kept', title: 'Kept', chosen: 'preserve' });
+  graph.addDecision({ project: 'gone', title: 'Gone', chosen: 'erase' });
+  const kept = graph.addDecision({ project: 'kept', title: 'Kept', chosen: 'preserve' });
   graph.purgeProject('gone', { mode: 'hard' });
-  const payload = graph.exportData();
+  const payload = privilegedSnapshot(graph);
   assert.equal(payload.journal.some((entry) => entry.type === 'projection.baseline'), false);
   assert.ok(payload.journal[0].seq > payload.journalEpoch, 'hard purge leaves an explicit leading gap');
   assert.deepEqual(payload.journal.find((entry) => entry.type === 'project.purged').payload.removedJournalSequences, [1]);
   assert.doesNotThrow(() => validateRestorePayload(payload, { now: () => NOW }));
   const restarted = createShadowGraph({ now: () => NOW });
   assert.doesNotThrow(() => restarted.importData(payload));
-  assert.deepEqual(restarted.exportData().records.map((record) => record.id), ['ds-p1-006-hard-kept']);
+  assert.deepEqual(privilegedSnapshot(restarted).records.map((record) => record.id), [kept.id]);
 });
 
 test('DS-P1-006 eighth review: JSON and SQLite restore reject both terminal resurrection snapshots atomically', async (t) => {
@@ -751,7 +749,7 @@ test('DS-P1-006 eighth review: JSON and SQLite restore reject both terminal resu
 test('DS-P1-006 eighth review: CLI, HTTP, and MCP restore reject the same baseline code and preserve destinations', async (t) => {
   const directory = await scratchDirectory(t, 'shadowgraph-eighth-review-interfaces-');
   const fixture = await verifierFixture(directory);
-  const { payload } = await signedMidstreamBaselineAttack(directory, fixture, 'expired', 'interfaces');
+  const { payload, factId } = await signedMidstreamBaselineAttack(directory, fixture, 'expired', 'interfaces');
   const source = join(directory, 'attack.json');
   await writePayload(source, payload);
 
@@ -779,8 +777,8 @@ test('DS-P1-006 eighth review: CLI, HTTP, and MCP restore reject the same baseli
     assert.equal(response.status, 400);
     assert.equal(failure.code, INVALID_BASELINE_PLACEMENT_CODE);
     assert.deepEqual(await readFile(httpDestination), httpBefore);
-    const records = await (await fetch(`http://127.0.0.1:${app.server.address().port}/records`)).json();
-    assert.deepEqual(records.records.map((record) => record.id), ['ds-p1-006-old-http']);
+    const records = await (await fetch(`http://127.0.0.1:${app.server.address().port}/records?project=old`)).json();
+    assert.deepEqual(records.records.map((record) => record.id), JSON.parse(httpBefore).records.map((record) => record.id));
   } finally {
     await new Promise((resolve) => app.server.close(resolve));
   }
@@ -806,7 +804,7 @@ test('DS-P1-006 eighth review: CLI, HTTP, and MCP restore reject the same baseli
     source,
     'projection baseline placement',
     'ds-p1-006-forged-baseline-interfaces',
-    'ds-p1-006-fact-interfaces'
+    factId
   ]) {
     assert.equal(publicFailure.includes(privateValue), false, `MCP failure disclosed ${privateValue}`);
   }

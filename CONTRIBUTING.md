@@ -52,6 +52,7 @@ Run the full gate set locally:
 
 ```bash
 npm run check
+npm run test:performance
 npm test
 npm run check:integrations
 npm run check:mcp

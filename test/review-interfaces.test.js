@@ -77,7 +77,7 @@ test('P1-4: GET /journal?limit=2 pages the journal', async (t) => {
     for (let index = 0; index < 4; index += 1) {
       await fetch(`${base}/decisions`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ project: 'p', title: `D${index}`, chosen: 'c' }) });
     }
-    const body = await (await fetch(`${base}/journal?limit=2`)).json();
+    const body = await (await fetch(`${base}/journal?project=p&limit=2`)).json();
     assert.equal(body.items.length, 2);
     assert.equal(body.page.limit, 2);
     assert.ok(body.page.total >= 4);
@@ -238,7 +238,7 @@ test('P1-5: malformed params return -32602 (invalid params)', async (t) => {
 test('P1-5: a genuine tool failure stays distinguishable from a protocol error', async (t) => {
   const child = await spawnMcp(t, 'tool-failure');
   try {
-    send(child, { jsonrpc: '2.0', id: 6, method: 'tools/call', params: { name: 'shadowgraph_update_status', arguments: { decisionId: 'nope', status: 'validated' } } });
+    send(child, { jsonrpc: '2.0', id: 6, method: 'tools/call', params: { name: 'shadowgraph_confidence_evidence', arguments: { project: 'p', decisionId: 'nope', reason: 'r', key: 'k' } } });
     const [response] = await collect(child, 1);
     assert.equal(response.id, 6);
     assert.equal(response.error.code, -32000, 'application errors keep the generic code');

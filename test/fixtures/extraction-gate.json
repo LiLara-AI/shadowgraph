@@ -1,0 +1,157 @@
+{
+  "gate": "AG-3",
+  "fixtureEvidenceIsActivationApproval": false,
+  "conditions": [
+    {
+      "id": 1,
+      "requirement": "Prior capture gate and pending backlog",
+      "fixtures": [
+        {
+          "file": "capture-activation.test.js",
+          "witness": "capture"
+        },
+        {
+          "file": "extraction-activation.test.js",
+          "witness": "Synthetic pending work."
+        }
+      ],
+      "requiredHostEvidence": "Approved capture gate receipt and non-trivial current backlog across enrolled projects."
+    },
+    {
+      "id": 2,
+      "requirement": "Ten executor restrictions",
+      "fixtures": [
+        {
+          "file": "extractor.test.js",
+          "witness": "startup checks resolve all ten restrictions"
+        }
+      ],
+      "requiredHostEvidence": "Installed host version, binary digest, resolved E-1 through E-10 configuration."
+    },
+    {
+      "id": 3,
+      "requirement": "Generation invalidators and completeness",
+      "fixtures": [
+        {
+          "file": "capture-generation.test.js",
+          "witness": "invalidating persistent changes"
+        },
+        {
+          "file": "capture-generation-completeness.test.js",
+          "witness": "generation completeness separates write invalidation"
+        }
+      ],
+      "requiredHostEvidence": "Exact candidate and unchanged protected restore equality."
+    },
+    {
+      "id": 4,
+      "requirement": "Races, kill, expired lease and late output",
+      "fixtures": [
+        {
+          "file": "extraction-worker.test.js",
+          "witness": "late result cannot cross"
+        },
+        {
+          "file": "extraction-worker.test.js",
+          "witness": "killed claimant"
+        },
+        {
+          "file": "extraction-activation.test.js",
+          "witness": "real local child exits"
+        },
+        {
+          "file": "extraction-activation.test.js",
+          "witness": "killed activated worker is reclaimed"
+        }
+      ],
+      "requiredHostEvidence": "Installed-host cleanup and detached lifetime observations."
+    },
+    {
+      "id": 5,
+      "requirement": "Frozen worker and capture budgets",
+      "fixtures": [
+        {
+          "file": "extraction-budget.test.js",
+          "witness": "frozen values are finite"
+        },
+        {
+          "file": "capture-admission.test.js",
+          "witness": "the session limit is the one reported when the queue binds too"
+        },
+        {
+          "file": "extraction-drain.test.js",
+          "witness": "shares its call ceiling"
+        }
+      ],
+      "requiredHostEvidence": "Record frozen budgets and unchanged capture admission limits."
+    },
+    {
+      "id": 6,
+      "requirement": "Unwritable store cannot fabricate receipts",
+      "fixtures": [
+        {
+          "file": "extraction-drain.test.js",
+          "witness": "failure inside the actual store commit"
+        }
+      ],
+      "requiredHostEvidence": "Preserved failure and successful recovery receipts."
+    },
+    {
+      "id": 7,
+      "requirement": "Verifier counterexamples and unsupported isolation",
+      "fixtures": [
+        {
+          "file": "extraction-output.test.js",
+          "witness": "extraction output cannot assign trust"
+        },
+        {
+          "file": "extraction-worker.test.js",
+          "witness": "unsupported output stays private"
+        }
+      ],
+      "requiredHostEvidence": "Review actual extracted results within approved real-data scope."
+    },
+    {
+      "id": 8,
+      "requirement": "No paid credential route",
+      "fixtures": [
+        {
+          "file": "extractor.test.js",
+          "witness": "credential/provider/proxy routes block"
+        },
+        {
+          "file": "extraction-activation.test.js",
+          "witness": "missing confirmation"
+        }
+      ],
+      "requiredHostEvidence": "Subscription/first-party auth, presence-only environment sweep and fresh no-overage confirmation."
+    },
+    {
+      "id": 9,
+      "requirement": "Deactivation, bounded backlog and declared status",
+      "fixtures": [
+        {
+          "file": "extraction-activation.test.js",
+          "witness": "deactivation interrupts"
+        },
+        {
+          "file": "extraction-activation.test.js",
+          "witness": "unconfirmed executor settlement"
+        },
+        {
+          "file": "extraction-activation.test.js",
+          "witness": "HTTP refreshes extraction availability"
+        },
+        {
+          "file": "capture-admission.test.js",
+          "witness": "the session limit is the one reported when the queue binds too"
+        },
+        {
+          "file": "extraction-supervision.test.js",
+          "witness": "parent death after running marker but before request"
+        }
+      ],
+      "requiredHostEvidence": "Real deactivation/restart and backlog/availability evidence; no orphan worker claim without proof."
+    }
+  ]
+}

@@ -1,0 +1,139 @@
+# Upgrade and rollback
+
+## Moving to 0.43.2
+
+Stop all wrappers, hooks, servers and workers and privately back up the complete
+store and integration home before upgrading. Use one runtime and one platform
+writer at a time on local hard-link-capable storage. Schema 7, project/sharing
+boundaries and the documented support limits are unchanged. Changed runtime or
+account identity still requires owner setup; older pending input is held under
+its original setup, not silently reassigned. See the beginner path in the
+[Windows quick start](../README.md#quick-start-windows-codex).
+
+This patch retries transient lock-release and backup/restore rename errors.
+After exhausted lock-release retries, `storage_lock_release_failed` means the
+operation completed; inspect stored state before replaying a write. Its error
+retains the operation result. If both operation and release fail, the original
+operation error remains primary. Stop writers and preserve the diagnostic and a
+private offline backup before resolving a persistent filesystem/access problem;
+never remove an active lock to force progress.
+
+JSON payloads, backup copies and JSON restore/rollback candidates are synced
+before replacement. Directory sync and physical power-cut immunity are not
+claimed. Unreadable captured input leaves a content-free gap marker. Temporary
+spool read errors retain the event for bounded retry; invalid content is dropped
+with a marker. At 4096 loss markers, `inputDroppedSaturated` and
+`capture_drop_accounting_saturated` mean the count is a lower bound. Unowned
+temporary files are ignored for that limit and preserved.
+
+Automatic corrections require a locally supported user statement related to the
+accepted new choice. This rejects fragment-only false correction proposals but
+does not establish perfect semantic interpretation. Maintenance still accepts
+its documented deterministic `now`; it changes current state, so use review for
+evaluation without aging. Future-effective facts retain non-decreasing time
+ordering; correct at the same effective boundary or record a later version. Do
+not expect an earlier current-time write to rewrite future history.
+
+## Moving to 0.43.1
+
+This reliability patch retains schema 7 and the existing host support limits.
+Stop all writers, hooks and workers before upgrading; do not mix runtime versions
+on one store. The fence now needs exclusive hard-link support on a local filesystem.
+An orphan `.lock.reclaim` guard fails closed and needs recovery with all writers
+stopped; see [locking and retry limits](../README.md#store-locking-and-retry-limits-0431).
+Capture retry accounting uses stable event keys across drain rounds, including
+interleaved hooks. Pending input is replayed on a later hook under the same
+destination and existing admission/deletion rules.
+
+### Recovering an orphan reclaim guard
+
+When a stale store lock needs reclamation, a leftover guard causes bounded
+`storage_lock_timeout` refusals intentionally.
+Recovery is an offline operator procedure; it does not require a runtime or
+schema change. Use a supported local filesystem with exclusive hard-link
+support. Network stores, mixed Windows/WSL writers and simultaneous old/new
+runtimes remain unsupported.
+
+1. Record the exact canonical `.lock` path in the timeout. Its reclaim guard is
+   that path with `.reclaim` appended. For example, a timeout for
+   `store.json.lock` identifies `store.json.lock.reclaim`; a timeout for
+   `store.json.restore.lock` identifies `store.json.restore.lock.reclaim`.
+   Confirm the path belongs to the intended configured store, including any
+   symlink resolution. Do not search for and delete matching lock files globally.
+2. Stop and account for **every** process that can write that store: enrolled
+   hosts, wrappers, hooks, extraction workers, MCP/HTTP servers, other CLI
+   processes and any service or scheduled launcher that could restart them.
+   Include other accounts on the same machine. A suspended process is still a
+   writer. If any writer's state is unknown, leave the guard in place.
+3. With all writers stopped, make a private filesystem backup of the store and
+   its companion files, and of the integration home containing configuration,
+   pending captures/outbox and receipts. Preserve SQLite companion files when
+   present. Keep this backup outside source control; do not rely on a backup
+   command that itself cannot obtain the blocked fence.
+4. Positively identify the orphan by the exact path from step 1 and confirmed
+   writer-free state from step 2. The reclaim guard is empty: it contains no
+   owner PID or token. The PID in an adjacent `.lock` belongs to that store-lock
+   owner, not necessarily the reclaimer. Neither an old timestamp nor a dead
+   adjacent PID proves the guard is orphaned. If ownership or quiescence cannot
+   be established, retain the files and request operator assistance.
+5. Remove **only that confirmed orphan reclaim guard**. Preserve the ordinary
+   `.lock`, other guards, lock candidates, store, journal and backup. Restart one
+   configured writer using one supported runtime version. The normal fence
+   logic handles a stale dead-owner store lock; do not delete it manually. If
+   writes are still refused, stop and retain the diagnostic and backup rather
+   than repeating lock deletion.
+
+This does not clear or reset pending captures. A later hook replays eligible
+input under the same destination and existing admission/deletion rules.
+Non-contention failures consume at most one attempt per hook, with an eight-cycle
+retry limit and content-free loss markers; contention, deadline exhaustion and
+newer schemas retain input without consuming an attempt. The seven-day age and
+spool-size bounds remain. The [host support limits](../README.md#supported-workflows)
+are unchanged.
+
+### Previous transition: 0.43.0
+
+Stop active wrappers/workers and back up each store before upgrading. For a manual store, use `shadowgraph backup <backup-file>` with that store selected. For the Codex wrapper, stop it and preserve its entire private home (configuration, memory, pending outbox and usage receipts) in a private location. Do not publish these backups.
+
+Install the version-pinned release tarball or GitHub tag. Source, executor or account identity changes require owner setup again. Re-setup preserves memory and usage but holds older pending captures with different setup provenance; it does not silently reassign them. Inspect status before deciding what to do with any held work.
+
+0.43.0 retains schema 7. For Claude Code CLI extraction, items left pending under an earlier extraction setup are reported as `priorSetup`, not as pending work, and are not extracted by a new activation. Keep a pre-upgrade backup for rollback; an older runtime is not a safe processor for new integration state. For older schema transitions, use the guidance below.
+
+### Moving between 0.41.0 and 0.42.0
+
+- **Take a backup before upgrading.** `shadowgraph backup [<file>]` copies the store: a JSON store
+  byte for byte, a SQLite store table by table. A backup taken before this build first saves the
+  store is still a schema-5 store that 0.41.0 opens. (Opening a SQLite store, this build adds a table
+  of its own to it; 0.41.0 still reads the store.) Once this build has saved the store, its backups are schema-7 stores; to use one with
+  0.41.0, restore it into a fresh path with this build and fork a schema-5 copy as below.
+- **Upgrading.** 0.42.0 reads every store 0.41.0 wrote (schemas 1 through 5) and writes schema 7 on
+  its next save. What changes for you:
+  - A write that names no project is refused (`write_scope_unresolved`). Pass `project`, or bind the
+    workspace to a project with `shadowgraph bind`.
+  - Records 0.41.0 stored in `default` -- written without a project, which 0.41.0 put there, or
+    naming `default` -- are legacy material whose owner this build treats as uncertain: no read
+    returns them, not even with `"project":"default"`.
+    They are not deleted. The JavaScript API's `legacyAttributionReview()` lists them, and
+    `shadowgraph attribute '{"ids":["<id>"],"targetProject":"<project>","reason":"<why>"}'`, which
+    you confirm at a terminal, moves named records into a project. To note their ids before
+    upgrading, run 0.41.0's `shadowgraph list`, which prints every record, and keep the ids of those
+    with `"project": "default"`. If you rely on such records
+    and do not want to move them, stay on 0.41.0.
+  - Some results changed shape; for example, `review` returns `{"items": [...], "completeness": {...}}`
+    instead of an array. The [changelog](../CHANGELOG.md) lists every breaking change.
+- **Going back to 0.41.0.** 0.41.0 reads schemas 1 through 5 only and refuses a store this build has
+  saved. Fork a schema-5 copy with `shadowgraph downgrade '{"output":"<new file>"}'`. It first writes
+  a verified preservation copy beside the store (`<store>.preservation-<time>`), then the copy, and
+  never changes the store. `<output>.report.json` names what schema 5 cannot hold, such as record
+  attribution, erasure tokens, claim evidence and capture state, and the copy's journal history is
+  replaced by one baseline entry. Point 0.41.0 only at the copy: given a schema-7 SQLite store, 0.41.0 can
+  set the file's journal mode before it refuses it.
+- **What 0.41.0 does not have.** 0.41.0 has none of this build's project isolation or deletion
+  records: there, a read that names no project returns every project's records, and restoring a
+  backup taken before a purge brings the purged material back.
+- **Hooks, capture, delivery and extraction.** 0.41.0 has no hook, capture, delivery or extraction
+  commands. Before switching to it, run with this build `shadowgraph deactivate extraction`,
+  `shadowgraph deactivate capture`, `shadowgraph deactivate delivery`,
+  `shadowgraph uninstall-hooks --capture` and `shadowgraph uninstall-hooks`, and check that
+  extraction's cleanup did not report `deferred` (see
+  [deactivate, uninstall and recover](extraction.md#deactivate-uninstall-and-recover)).

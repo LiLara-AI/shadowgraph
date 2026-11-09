@@ -83,7 +83,7 @@ test('MCP initialize answers a per-request-only revision with the latest handsha
   assert.deepEqual(Object.keys(initialized.result.capabilities).sort(), ['prompts', 'resources', 'tools']);
 
   const listed = await rpc.call({ jsonrpc: '2.0', id: 'legacy-tools', method: 'tools/list', params: {} });
-  assert.equal(listed.result.tools.length, 28);
+  assert.equal(listed.result.tools.length, 35);
   assert.equal(Object.hasOwn(listed.result, 'resultType'), false);
   const called = await rpc.call({
     jsonrpc: '2.0', id: 'legacy-call', method: 'tools/call',
@@ -106,7 +106,7 @@ test('MCP modern discovery and every advertised primitive use 2026-07-28 result 
   assertModernComplete(discovered.result);
 
   const tools = await rpc.call({ jsonrpc: '2.0', id: 'tools', method: 'tools/list', params: modernParams() });
-  assert.equal(tools.result.tools.length, 28);
+  assert.equal(tools.result.tools.length, 35);
   assert.equal(tools.result.cacheScope, 'public');
   assert.equal(tools.result.ttlMs, 0);
   assertModernComplete(tools.result);
@@ -177,8 +177,8 @@ test('MCP modern metadata, version, JSON-RPC, and tool errors remain distinguish
   const executionFailure = await rpc.call({
     jsonrpc: '2.0', id: 5, method: 'tools/call',
     params: modernParams({
-      name: 'shadowgraph_update_status',
-      arguments: { decisionId: 'missing', status: 'planned' }
+      name: 'shadowgraph_confidence_evidence',
+      arguments: { project: 'p', decisionId: 'missing', reason: 'no such decision', key: 'missing' }
     })
   });
   assert.equal(executionFailure.error, undefined);
@@ -201,7 +201,7 @@ test('MCP modern notifications are accepted without any response', async (t) => 
   assert.deepEqual(rpc.unsolicited, []);
   const listed = await rpc.call({ jsonrpc: '2.0', id: 'after-notification', method: 'tools/list', params: modernParams() });
   assert.equal(listed.id, 'after-notification');
-  assert.equal(listed.result.tools.length, 28);
+  assert.equal(listed.result.tools.length, 35);
 });
 
 test('MCP modern compact mode advertises exactly 16 tools', async (t) => {

@@ -11,6 +11,7 @@ import { createShadowGraph } from '../src/shadowgraph.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
 import { createJsonFileStore } from '../src/storage.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
+import { privilegedSnapshot } from '../src/internal/snapshot.js';
 
 const NODE_SQLITE = (await getRuntimeCapabilities()).nodeSqlite;
 const SQLITE_TEST_OPTIONS = NODE_SQLITE.available ? {} : { skip: NODE_SQLITE.reason };
@@ -43,43 +44,49 @@ function graphWithObjectEvidence() {
     }]
   });
   seed.addFact({ project: 'p', key: 'lagProfile', value: ['spike'], validFrom: '2026-01-02T00:00:00.000Z' });
-  const snapshot = seed.exportData();
+  const snapshot = privilegedSnapshot(seed);
   const original = snapshot.facts[0];
-  snapshot.facts = [...snapshot.facts, { ...original, id: 'fact:contested', value: ['spike', 'extra'] }];
+  snapshot.facts = [...snapshot.facts, { ...original, id: 'fact:contested', value: ['spike', 'extra'], erasureToken: 'tok_contested' }];
   const graph = createShadowGraph();
   graph.importData(snapshot);
   return { graph, decision };
 }
 
 test('mutating a returned violatedConditions value cannot reach canonical state', () => {
-  const { graph } = graphWithObjectEvidence();
-  // Snapshot AFTER the first read: context() raises the review signal as a
-  // documented side effect, and this test is about mutation, not that.
-  graph.context({ project: 'p' });
-  const before = JSON.stringify(graph.exportData());
+  // Both the read and the persisting operation; reviewContext also stores the
+  // signal the returned value must not alias.
+  for (const method of ['context', 'reviewContext']) {
+    const { graph } = graphWithObjectEvidence();
+    // Snapshot AFTER the first call: reviewContext() raises the review signal as
+    // a documented side effect, and this test is about mutation, not that.
+    graph[method]({ project: 'p' });
+    const before = JSON.stringify(privilegedSnapshot(graph));
+    if (method === 'reviewContext') assert.equal(privilegedSnapshot(graph).reviewSignals.length, 1, 'the signal is stored');
 
-  const breach = graph.context({ project: 'p' }).openReviews
-    .flatMap((item) => item.violatedConditions ?? [])
-    .find((item) => Array.isArray(item.observed));
-  assert.ok(breach, 'a breach carrying an array value is reported');
-  const observed = JSON.parse(JSON.stringify(breach.observed));
+    const fired = method === 'context' ? 'firedConditions' : 'openReviews';
+    const breach = graph[method]({ project: 'p' })[fired]
+      .flatMap((item) => item.violatedConditions ?? [])
+      .find((item) => Array.isArray(item.observed));
+    assert.ok(breach, 'a breach carrying an array value is reported');
+    const observed = JSON.parse(JSON.stringify(breach.observed));
 
-  breach.observed.push('tampered');
-  if (breach.evidence) breach.evidence.value = { tampered: true };
-  for (const reference of breach.conflictingEvidence ?? []) reference.value = { tampered: true };
+    breach.observed.push('tampered');
+    if (breach.evidence) breach.evidence.value = { tampered: true };
+    for (const reference of breach.conflictingEvidence ?? []) reference.value = { tampered: true };
 
-  assert.equal(JSON.stringify(graph.exportData()), before, 'no canonical state moved');
-  const again = graph.context({ project: 'p' }).openReviews
-    .flatMap((item) => item.violatedConditions ?? [])
-    .find((item) => Array.isArray(item.observed));
-  assert.deepEqual(again.observed, observed, 'a later response is unaffected');
-  assert.equal(again.expected, 'spike', 'the stored rule is unaffected');
+    assert.equal(JSON.stringify(privilegedSnapshot(graph)), before, `${method}: no canonical state moved`);
+    const again = graph[method]({ project: 'p' })[fired]
+      .flatMap((item) => item.violatedConditions ?? [])
+      .find((item) => Array.isArray(item.observed));
+    assert.deepEqual(again.observed, observed, 'a later response is unaffected');
+    assert.equal(again.expected, 'spike', 'the stored rule is unaffected');
+  }
 });
 
 test('mutating a returned conditionDiagnostics value cannot reach canonical state', () => {
   const { graph, decision } = graphWithObjectEvidence();
   graph.context({ project: 'p' });
-  const before = JSON.stringify(graph.exportData());
+  const before = JSON.stringify(privilegedSnapshot(graph));
 
   const entry = graph.context({ project: 'p' }).conditionDiagnostics.find((item) => item.decisionId === decision.id);
   assert.ok(entry, 'the contested condition is reported as a diagnostic');
@@ -89,7 +96,7 @@ test('mutating a returned conditionDiagnostics value cannot reach canonical stat
     for (const reference of condition.conflictingEvidence ?? []) reference.value = null;
   }
 
-  assert.equal(JSON.stringify(graph.exportData()), before, 'no canonical state moved');
+  assert.equal(JSON.stringify(privilegedSnapshot(graph)), before, 'no canonical state moved');
 });
 
 test('mutating a returned attempt condition detail cannot reach canonical state', () => {
@@ -101,7 +108,7 @@ test('mutating a returned attempt condition detail cannot reach canonical state'
     reusableWhen: [{ key: 'limits', operator: 'gte', value: 600 }]
   });
   graph.addFact({ project: 'p', key: 'limits', value: ['raised', 'audited'] });
-  const before = JSON.stringify(graph.exportData());
+  const before = JSON.stringify(privilegedSnapshot(graph));
 
   const condition = graph.context({ project: 'p' }).conditionDiagnostics
     .filter((item) => item.attemptId).flatMap((item) => item.conditions)
@@ -110,7 +117,7 @@ test('mutating a returned attempt condition detail cannot reach canonical state'
   condition.observed.push('tampered');
   if (condition.evidence) condition.evidence.value = null;
 
-  assert.equal(JSON.stringify(graph.exportData()), before, 'no canonical state moved');
+  assert.equal(JSON.stringify(privilegedSnapshot(graph)), before, 'no canonical state moved');
   const again = graph.context({ project: 'p' }).conditionDiagnostics
     .filter((item) => item.attemptId).flatMap((item) => item.conditions)
     .find((item) => Array.isArray(item.observed));
@@ -124,14 +131,14 @@ test('a satisfied reusable attempt hands back detached condition details', () =>
     reusableWhen: [{ key: 'limits', operator: 'contains', value: 'raised' }]
   });
   graph.addFact({ project: 'p', key: 'limits', value: ['raised', 'audited'] });
-  const before = JSON.stringify(graph.exportData());
+  const before = JSON.stringify(privilegedSnapshot(graph));
 
   const reusable = graph.context({ project: 'p' }).reusableAttempts[0];
   assert.ok(reusable, 'the attempt is reported reusable');
   reusable.satisfiedConditions[0].observed.push('tampered');
   if (reusable.satisfiedConditions[0].evidence) reusable.satisfiedConditions[0].evidence.value = null;
 
-  assert.equal(JSON.stringify(graph.exportData()), before, 'no canonical state moved');
+  assert.equal(JSON.stringify(privilegedSnapshot(graph)), before, 'no canonical state moved');
   assert.deepEqual(
     graph.context({ project: 'p' }).reusableAttempts[0].satisfiedConditions[0].observed,
     ['raised', 'audited'],
@@ -150,13 +157,13 @@ test('a tampered response leaves the persisted rebuild identical', async (t) => 
   graph.addFact({ project: 'p', key: 'shape', value: ['n', 'm'] });
 
   // Tamper BEFORE the snapshot, so a leak would be carried into what is saved.
-  const breach = graph.context({ project: 'p' }).openReviews[0].violatedConditions[0];
+  const breach = graph.context({ project: 'p' }).firedConditions[0].violatedConditions[0];
   breach.observed.push('tampered');
-  await store.save(graph.exportData());
+  await store.save(privilegedSnapshot(graph));
 
   const restored = createShadowGraph();
   restored.importData(await store.load());
-  const rebuilt = restored.context({ project: 'p' }).openReviews[0].violatedConditions[0];
+  const rebuilt = restored.context({ project: 'p' }).firedConditions[0].violatedConditions[0];
   assert.deepEqual(rebuilt.observed, ['n', 'm'], 'rebuild restores nothing, because nothing changed');
 });
 
@@ -202,17 +209,14 @@ test('an attempt whose conditions are all structured and true is still reusable'
 // Finding 3 -- an acknowledgement covers exactly the breach set it acknowledged.
 // ---------------------------------------------------------------------------
 
-// `ids` supplies stable identifiers where a test needs two graphs to be
-// comparable; without them every run generates fresh ones.
-function twoThresholdDecision(graph, ids = {}) {
+function twoThresholdDecision(graph) {
   return graph.addDecision({
     project: 'p',
-    ...(ids.decision ? { id: ids.decision } : {}),
     title: 'Serve reads from the local replica',
     chosen: 'local-replica',
     alternatives: [
-      { ...(ids.low ? { id: ids.low } : {}), label: 'primary-only', reasonRejected: 'lag was acceptable', reopenWhen: [{ key: 'lag', operator: 'gte', value: 500 }] },
-      { ...(ids.high ? { id: ids.high } : {}), label: 'dual-write', reasonRejected: 'lag was well under budget', reopenWhen: [{ key: 'lag', operator: 'gte', value: 1000 }] }
+      { label: 'primary-only', reasonRejected: 'lag was acceptable', reopenWhen: [{ key: 'lag', operator: 'gte', value: 500 }] },
+      { label: 'dual-write', reasonRejected: 'lag was well under budget', reopenWhen: [{ key: 'lag', operator: 'gte', value: 1000 }] }
     ]
   });
 }
@@ -222,16 +226,16 @@ test('a second threshold on the same key does not inherit the first acknowledgem
   const decision = twoThresholdDecision(graph);
 
   graph.addFact({ project: 'p', key: 'lag', value: 600 });
-  const first = graph.context({ project: 'p' }).openReviews[0];
+  const first = graph.reviewContext({ project: 'p' }).openReviews[0];
   assert.equal(first.reviewSignalStatus, 'open');
-  graph.acknowledgeReview(first.reviewSignalId);
-  assert.equal(graph.context({ project: 'p' }).openReviews[0].reviewSignalStatus, 'acknowledged', 'an unchanged breach stays acknowledged');
+  graph.acknowledgeReview(first.reviewSignalId, { project: 'p' });
+  assert.equal(graph.reviewContext({ project: 'p' }).openReviews[0].reviewSignalStatus, 'acknowledged', 'an unchanged breach stays acknowledged');
 
   graph.addFact({ project: 'p', key: 'lag', value: 1200 });
-  const broadened = graph.context({ project: 'p' }).openReviews.find((item) => item.decisionId === decision.id);
+  const broadened = graph.reviewContext({ project: 'p' }).openReviews.find((item) => item.decisionId === decision.id);
   assert.equal(broadened.reviewSignalStatus, 'open', 'the newly breached alternative is not covered by the old acknowledgement');
   assert.equal(
-    graph.getReviewSignals({ project: 'p', status: 'open' }).length, 1,
+    graph.getReviewSignals({ project: 'p', status: 'open' }).items.length, 1,
     'and it is reachable as an open signal'
   );
 });
@@ -240,13 +244,13 @@ test('narrowing back to the acknowledged breach set restores the acknowledgement
   const graph = createShadowGraph();
   twoThresholdDecision(graph);
   graph.addFact({ project: 'p', key: 'lag', value: 600 });
-  graph.acknowledgeReview(graph.context({ project: 'p' }).openReviews[0].reviewSignalId);
+  graph.acknowledgeReview(graph.reviewContext({ project: 'p' }).openReviews[0].reviewSignalId, { project: 'p' });
   graph.addFact({ project: 'p', key: 'lag', value: 1200 });
-  assert.equal(graph.context({ project: 'p' }).openReviews[0].reviewSignalStatus, 'open');
+  assert.equal(graph.reviewContext({ project: 'p' }).openReviews[0].reviewSignalStatus, 'open');
 
   graph.addFact({ project: 'p', key: 'lag', value: 600 });
   assert.equal(
-    graph.context({ project: 'p' }).openReviews[0].reviewSignalStatus, 'acknowledged',
+    graph.reviewContext({ project: 'p' }).openReviews[0].reviewSignalStatus, 'acknowledged',
     'the original coverage is unchanged and stays acknowledged'
   );
 });
@@ -257,21 +261,21 @@ test('an acknowledgement survives a restart', async (t) => {
   const graph = createShadowGraph();
   twoThresholdDecision(graph);
   graph.addFact({ project: 'p', key: 'lag', value: 600 });
-  graph.acknowledgeReview(graph.context({ project: 'p' }).openReviews[0].reviewSignalId);
-  await store.save(graph.exportData());
+  graph.acknowledgeReview(graph.reviewContext({ project: 'p' }).openReviews[0].reviewSignalId, { project: 'p' });
+  await store.save(privilegedSnapshot(graph));
 
   const restored = createShadowGraph();
   restored.importData(await store.load());
-  assert.equal(restored.context({ project: 'p' }).openReviews[0].reviewSignalStatus, 'acknowledged');
+  assert.equal(restored.reviewContext({ project: 'p' }).openReviews[0].reviewSignalStatus, 'acknowledged');
 
   restored.addFact({ project: 'p', key: 'lag', value: 1200 });
-  assert.equal(restored.context({ project: 'p' }).openReviews[0].reviewSignalStatus, 'open', 'a broader breach is still open after a restart');
+  assert.equal(restored.reviewContext({ project: 'p' }).openReviews[0].reviewSignalStatus, 'open', 'a broader breach is still open after a restart');
 });
 
 test('acknowledgement coverage behaves identically on JSON and SQLite', async (t) => {
   const directory = await scratchDirectory(t, 'review-ack-parity-');
 
-  // ONE snapshot, with fixed identifiers, feeds both backends. An earlier
+  // One snapshot, with generated identifiers, feeds both backends. An earlier
   // version built a graph per backend, so each got freshly generated alternative
   // ids; coverage sorts on those ids, and masking them afterwards left two
   // correct-but-differently-ordered arrays. That made the test fail about half
@@ -279,10 +283,10 @@ test('acknowledgement coverage behaves identically on JSON and SQLite', async (t
   // Fixed clocks too, so the only value minted per backend is the new signal's
   // random id.
   const source = createShadowGraph({ now: () => '2026-02-01T00:00:00.000Z' });
-  twoThresholdDecision(source, { decision: 'decision:d1', low: 'alternative:low', high: 'alternative:high' });
-  source.addFact({ project: 'p', key: 'lag', value: 600, id: 'fact:narrow' });
-  source.acknowledgeReview(source.context({ project: 'p' }).openReviews[0].reviewSignalId);
-  const snapshot = source.exportData();
+  twoThresholdDecision(source);
+  source.addFact({ project: 'p', key: 'lag', value: 600 });
+  source.acknowledgeReview(source.reviewContext({ project: 'p' }).openReviews[0].reviewSignalId, { project: 'p' });
+  const snapshot = privilegedSnapshot(source);
 
   const snapshots = {};
   for (const backend of ['json', 'sqlite']) {
@@ -298,17 +302,17 @@ test('acknowledgement coverage behaves identically on JSON and SQLite', async (t
 
       const restarted = createShadowGraph({ now: () => '2026-02-02T00:00:00.000Z' });
       restarted.importData(durable);
-      assert.equal(restarted.context({ project: 'p' }).openReviews[0].reviewSignalStatus, 'acknowledged', `${backend}: the acknowledgement survives`);
+      assert.equal(restarted.reviewContext({ project: 'p' }).openReviews[0].reviewSignalStatus, 'acknowledged', `${backend}: the acknowledgement survives`);
 
-      restarted.addFact({ project: 'p', key: 'lag', value: 1200, id: 'fact:broad' });
-      assert.equal(restarted.context({ project: 'p' }).openReviews[0].reviewSignalStatus, 'open', `${backend}: the broadened breach is open`);
+      const broad = restarted.addFact({ project: 'p', key: 'lag', value: 1200 });
+      assert.equal(restarted.reviewContext({ project: 'p' }).openReviews[0].reviewSignalStatus, 'open', `${backend}: the broadened breach is open`);
 
-      // Every identifier and timestamp above is fixed, so the new signal's own
-      // random id is the only minted value left. Coverage now sorts on identical
+      // Both backends import the same generated identities. Normalize only
+      // the new fact and signal IDs each backend generated independently. Coverage now sorts on identical
       // alternative ids, so its order is deterministic too.
       snapshots[backend] = JSON.stringify(
-        restarted.getReviewSignals({ project: 'p' }).sort((left, right) => left.status.localeCompare(right.status))
-      ).replace(/review_\d+_[a-z0-9]+/g, 'review_MINTED');
+        restarted.getReviewSignals({ project: 'p' }).items.sort((left, right) => left.status.localeCompare(right.status))
+      ).replaceAll(broad.id, 'fact_MINTED').replace(/review_\d+_[a-z0-9]+/g, 'review_MINTED');
     });
   }
 
@@ -357,7 +361,7 @@ test('maintain changes housekeeping, not the semantic answer', () => {
   const clock = clockFrom('2026-01-02T00:00:00.000Z');
   const graph = expiringReuseGraph(clock);
   const before = graph.context({ project: 'p' });
-  graph.maintain({});
+  graph.maintain({ project: 'p' });
   const after = graph.context({ project: 'p' });
   assert.deepEqual(after.reusableAttempts, before.reusableAttempts);
   assert.deepEqual(after.conditionDiagnostics, before.conditionDiagnostics);
@@ -386,10 +390,10 @@ test('an expired candidate drops out of conflicting evidence rather than contest
   });
   // The surviving observation says no breach; the expiring one disagrees.
   seed.addFact({ project: 'p', key: 'lag', value: 100, validFrom: '2025-12-01T00:00:00.000Z' });
-  const snapshot = seed.exportData();
+  const snapshot = privilegedSnapshot(seed);
   const original = snapshot.facts[0];
   snapshot.facts = [...snapshot.facts, {
-    ...original, id: 'fact:expiring', value: 600,
+    ...original, id: 'fact:expiring', value: 600, erasureToken: 'tok_expiring',
     expiresAt: '2026-01-01T00:00:00.000Z',
     validityPolicy: { declaredExpiresAt: '2026-01-01T00:00:00.000Z', declaredValidTo: null, effectiveExpirationBoundary: '2026-01-01T00:00:00.000Z' }
   }];

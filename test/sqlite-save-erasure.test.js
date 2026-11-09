@@ -1,3 +1,4 @@
+const fixtureIds = {};
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -10,6 +11,7 @@ import { NODE_SQLITE_NOT_APPLICABLE_REASON } from '../src/runtime-capabilities.j
 import { createShadowGraph } from '../src/shadowgraph.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
+import { privilegedSnapshot } from '../src/internal/snapshot.js';
 
 const SQLITE_SIDECAR_SUFFIXES = ['-wal', '-shm', '-journal'];
 
@@ -31,21 +33,20 @@ test('normal SQLite save physically erases bytes removed by a graph hard purge',
   const sentinel = `SQLITE-NORMAL-SAVE-PURGE-${randomUUID()}-${'secret'.repeat(15)}`;
   const graph = createShadowGraph({ now: () => '2026-08-28T00:00:00.000Z' });
   graph.addDecision({
-    id: `decision-${sentinel}`,
     project: 'private-project',
     title: sentinel,
     chosen: sentinel,
     idempotencyKey: `retry-${sentinel}`
   });
-  graph.addDecision({ id: 'kept-decision', project: 'kept-project', title: 'Keep', chosen: 'safe' });
+  fixtureIds['kept-decision'] = graph.addDecision({ project: 'kept-project', title: 'Keep', chosen: 'safe' }).id;
 
   let store = await createSqliteStore(file);
-  const firstRevision = await store.save(graph.exportData());
+  const firstRevision = await store.save(privilegedSnapshot(graph));
   assert.equal((await readFile(file)).includes(Buffer.from(sentinel)), true, 'precondition: secret sentinel reached SQLite bytes');
 
   const purge = graph.purgeProject('private-project', { mode: 'hard' });
   assert.equal(purge.mode, 'hard');
-  const purged = graph.exportData();
+  const purged = privilegedSnapshot(graph);
   assert.equal(JSON.stringify(purged).includes(sentinel), false, 'graph hard purge removes the sentinel logically');
   const secondRevision = await store.save({ ...purged, expectedRevision: firstRevision });
   assert.equal(secondRevision, firstRevision + 1);
@@ -73,13 +74,12 @@ test('normal SQLite save physically erases bytes removed by a graph hard purge',
 function secretGraph(sentinel, privateProject = 'private-project') {
   const graph = createShadowGraph({ now: () => '2026-08-28T00:00:00.000Z' });
   graph.addDecision({
-    id: `decision-${sentinel}`,
     project: privateProject,
     title: sentinel,
     chosen: sentinel,
     idempotencyKey: `retry-${sentinel}`
   });
-  graph.addDecision({ id: 'kept-decision', project: 'kept-project', title: 'Keep', chosen: 'safe' });
+  fixtureIds['kept-decision'] = graph.addDecision({ project: 'kept-project', title: 'Keep', chosen: 'safe' }).id;
   return graph;
 }
 
@@ -109,11 +109,11 @@ test('normal SQLite save physically erases bytes removed by a graph logical purg
   const sentinel = `SQLITE-LOGICAL-PURGE-${randomUUID()}-${'private'.repeat(12)}`;
   const graph = secretGraph(sentinel);
   const store = await createSqliteStore(file);
-  const firstRevision = await store.save(graph.exportData());
+  const firstRevision = await store.save(privilegedSnapshot(graph));
   assert.equal((await readFile(file)).includes(Buffer.from(sentinel)), true);
   const purge = graph.purgeProject('private-project', { mode: 'logical' });
   assert.ok(purge.journalEntriesRedacted > 0);
-  const purged = graph.exportData();
+  const purged = privilegedSnapshot(graph);
   assert.equal(JSON.stringify(purged).includes(sentinel), false);
   assert.equal(await store.save({ ...purged, expectedRevision: firstRevision }), firstRevision + 1);
   store.close();
@@ -136,9 +136,9 @@ test('destructive SQLite save rolls back before COMMIT and reconciles an injecte
       if (injectionEnabled && stage === injectedStage) throw new Error(`injected ${stage}`);
     }
   });
-  const firstRevision = await store.save(graph.exportData());
+  const firstRevision = await store.save(privilegedSnapshot(graph));
   graph.purgeProject('private-project', { mode: 'hard' });
-  const purged = graph.exportData();
+  const purged = privilegedSnapshot(graph);
 
   injectedStage = 'beforeCommit';
   injectionEnabled = true;
@@ -194,10 +194,10 @@ test('append-only SQLite saves do not pay the destructive VACUUM path', async (t
     }
   });
   const graph = createShadowGraph({ now: () => '2026-08-28T00:00:00.000Z' });
-  graph.addDecision({ id: 'append-one', project: 'append', title: 'One', chosen: 'one' });
-  const firstRevision = await store.save(graph.exportData());
-  graph.addDecision({ id: 'append-two', project: 'append', title: 'Two', chosen: 'two' });
-  assert.equal(await store.save({ ...graph.exportData(), expectedRevision: firstRevision }), firstRevision + 1);
+  fixtureIds['append-one'] = graph.addDecision({ project: 'append', title: 'One', chosen: 'one' }).id;
+  const firstRevision = await store.save(privilegedSnapshot(graph));
+  fixtureIds['append-two'] = graph.addDecision({ project: 'append', title: 'Two', chosen: 'two' }).id;
+  assert.equal(await store.save({ ...privilegedSnapshot(graph), expectedRevision: firstRevision }), firstRevision + 1);
   store.close();
   assert.equal(statements.some((sql) => /\bVACUUM\b/i.test(sql)), false, 'append-only saves must skip compaction');
 });
@@ -211,11 +211,11 @@ test('destructive save serializes across idle stores and rejects the stale write
   const sentinel = `SQLITE-CONCURRENT-PURGE-${randomUUID()}-${'secret'.repeat(10)}`;
   const graph = secretGraph(sentinel);
   const first = await createSqliteStore(file);
-  const firstRevision = await first.save(graph.exportData());
+  const firstRevision = await first.save(privilegedSnapshot(graph));
   const second = await createSqliteStore(file);
   const stale = await second.load();
   graph.purgeProject('private-project', { mode: 'hard' });
-  const purged = graph.exportData();
+  const purged = privilegedSnapshot(graph);
   assert.equal(await first.save({ ...purged, expectedRevision: firstRevision }), firstRevision + 1);
   await assert.rejects(
     second.save({ ...stale, records: [...stale.records, { id: 'stale', kind: 'decision' }], expectedRevision: firstRevision }),
@@ -235,7 +235,7 @@ test('destructive save fences a separate stale writer process', async (t) => {
   const sentinel = `SQLITE-PROCESS-PURGE-${randomUUID()}-${'secret'.repeat(10)}`;
   const graph = secretGraph(sentinel);
   const store = await createSqliteStore(file);
-  const firstRevision = await store.save(graph.exportData());
+  const firstRevision = await store.save(privilegedSnapshot(graph));
 
   const moduleUrl = new URL('../src/sqlite-storage.js', import.meta.url).href;
   const childCode = `
@@ -278,7 +278,7 @@ test('destructive save fences a separate stale writer process', async (t) => {
   assert.deepEqual(messages[0], { phase: 'loaded', revision: firstRevision });
 
   graph.purgeProject('private-project', { mode: 'hard' });
-  assert.equal(await store.save({ ...graph.exportData(), expectedRevision: firstRevision }), firstRevision + 1);
+  assert.equal(await store.save({ ...privilegedSnapshot(graph), expectedRevision: firstRevision }), firstRevision + 1);
   child.stdin.end('save');
   await once(child, 'exit');
   assert.equal(messages[1]?.phase, 'rejected');
@@ -299,14 +299,14 @@ test('normal destructive save stays erased through SQLite backup and restore', a
   const sentinel = `SQLITE-BACKUP-RESTORE-PURGE-${randomUUID()}-${'secret'.repeat(10)}`;
   const graph = secretGraph(sentinel);
   const sourceStore = await createSqliteStore(live);
-  const firstRevision = await sourceStore.save(graph.exportData());
+  const firstRevision = await sourceStore.save(privilegedSnapshot(graph));
   graph.purgeProject('private-project', { mode: 'hard' });
-  assert.equal(await sourceStore.save({ ...graph.exportData(), expectedRevision: firstRevision }), firstRevision + 1);
+  assert.equal(await sourceStore.save({ ...privilegedSnapshot(graph), expectedRevision: firstRevision }), firstRevision + 1);
   await sourceStore.backup(backup);
   sourceStore.close();
 
   const destinationStore = await createSqliteStore(restored);
-  await destinationStore.save(secretGraph('destination-old-secret').exportData());
+  await destinationStore.save(privilegedSnapshot(secretGraph('destination-old-secret')));
   await destinationStore.restore(backup);
   const restoredPayload = await destinationStore.load();
   assert.equal(restoredPayload.revision, firstRevision + 2, 'restore revision remains monotonic');

@@ -1,5 +1,10 @@
 # ShadowGraph — Technical Preview launch checklist
 
+> **Historical (v0.41.0).** This document describes the 0.41.0 Technical Preview. The current
+> release is 0.42.2 (`github:LiLara-AI/shadowgraph#v0.42.2`); to install 0.41.0,
+> use `github:LiLara-AI/shadowgraph#v0.41.0`. See
+> [Moving between 0.41.0 and 0.42.0](../../README.md#moving-between-0410-and-0420).
+
 The final **human** checklist for announcing the Technical Preview. Tick each line yourself before
 posting anything from [`short-announcement.md`](short-announcement.md) or
 [`technical-preview-announcement.md`](technical-preview-announcement.md).

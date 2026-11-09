@@ -4,17 +4,17 @@ import { dirname, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
-const INSPECTOR_VERSION = '2.4.0';
+const INSPECTOR_VERSION = '2.11.0';
 // CI installs the exact client through tooling/mcp-gates/package-lock.json.
 // npx remains a bounded fallback for a source checkout without those tools.
 const INSPECTOR_TIMEOUT_MS = 300_000;
 const expected = [
-  { name: 'Full', count: 28, env: [] },
-  { name: 'Compact', count: 16, env: ['SHADOWGRAPH_MCP_COMPACT=1'] }
+  { name: 'Full', count: 35, env: [] },
+  { name: 'Compact', count: 16, env: ['SHADOWGRAPH_MCP_COMPACT=1'] },
+  { name: 'Workflow', count: 20, env: ['SHADOWGRAPH_MCP_COMPACT=0', 'SHADOWGRAPH_MCP_PROFILE=workflow'] }
 ];
-// These two return a bare JSON array, so they cannot carry an object-rooted
-// output schema. See src/mcp-tools.js and docs/mcp-compatibility.md.
-const outputSchemaOmitted = new Set(['shadowgraph_review', 'shadowgraph_review_signals']);
+// Every tool now has an object envelope and output schema.
+const outputSchemaOmitted = new Set();
 const annotationHints = ['readOnlyHint', 'destructiveHint', 'idempotentHint', 'openWorldHint'];
 
 // The Inspector connects through the official SDK and declares a revision that
@@ -42,8 +42,12 @@ const localInspectorCli = join(
   'clients', 'launcher', 'build', 'index.js'
 );
 const useLocalInspector = existsSync(localInspectorCli);
-const npxCli = process.env.npm_execpath ? join(dirname(process.env.npm_execpath), 'npx-cli.js') : null;
-const useNpxCli = Boolean(npxCli && existsSync(npxCli));
+const npxCandidates = [
+  process.env.npm_execpath ? join(dirname(process.env.npm_execpath), 'npx-cli.js') : null,
+  join(dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npx-cli.js')
+].filter(Boolean);
+const npxCli = npxCandidates.find((candidate) => existsSync(candidate)) ?? null;
+const useNpxCli = Boolean(npxCli);
 const runner = useLocalInspector || useNpxCli ? process.execPath : (process.platform === 'win32' ? 'npx.cmd' : 'npx');
 
 try {

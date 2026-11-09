@@ -1,15 +1,24 @@
+import { assertToolCreationInput } from './internal/creation-id.js';
 import { createInterface } from 'node:readline';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { stat as fsStat, unlink as fsUnlink } from 'node:fs/promises';
-import { createStorage } from './storage.js';
+import { createStorage, resolveDefaultProject, resolveStoragePath } from './storage.js';
 import { createShadowGraph, isCommittedRejection } from './shadowgraph.js';
 import { createEmbeddingClient } from './embedding.js';
 import { VERSION } from './version.js';
 import { createRestoreValidator } from './restore-validation.js';
 import { loadLocalEvidenceVerifier } from './verification.js';
 import { BATCH_PROTOCOL_VERSIONS, LEGACY_PROTOCOL_VERSIONS, METADATA_TIER, buildToolCatalog, metadataTierForProtocolVersion, negotiateLegacyProtocolVersion, projectTool, selectTools, toolResult } from './mcp-tools.js';
+import { privilegedAccessRefusal, privilegedSnapshot } from './internal/snapshot.js';
+import { accessContext, currentAccessOperation, discoverWorkspace, hasAccessReference } from './internal/access-transport.js';
+import { readExtractionAvailability } from './internal/extraction-availability.js';
+import { DELETION_CODES } from './internal/deletion-knowledge.js';
 
-const file = process.env.SHADOWGRAPH_FILE ?? './.shadowgraph/data.json';
+const file = resolveStoragePath(process.env.SHADOWGRAPH_FILE);
+const configuredDefaultProject = (!process.env.SHADOWGRAPH_FILE || process.env.SHADOWGRAPH_PROJECT || process.env.SHADOWGRAPH_AUTO_PROJECT === '1')
+  ? resolveDefaultProject()
+  : null;
+const multiProcessSyncEnabled = process.env.SHADOWGRAPH_MULTI_PROCESS_SYNC === '1' || !process.env.SHADOWGRAPH_FILE;
 const injectedRestoreFaultStages = process.env.NODE_ENV === 'test'
   ? new Set(String(process.env.SHADOWGRAPH_TEST_RESTORE_FAULT_STAGES ?? '').split(',').map((value) => value.trim()).filter(Boolean))
   : new Set();
@@ -74,16 +83,28 @@ const MODERN_PROTOCOL_VERSION = '2026-07-28';
 const SUPPORTED_PROTOCOL_VERSIONS = Object.freeze([MODERN_PROTOCOL_VERSION, ...LEGACY_PROTOCOL_VERSIONS]);
 const JSON_RPC_ERROR = Symbol('shadowgraph.jsonRpcError');
 const PUBLIC_ERROR = Symbol('shadowgraph.publicError');
-const graph = createShadowGraph({ verifier, ...(injectedNow ? { now: injectedNow } : {}) });
+let extractionAvailability = () => false;
+// The binding is read through, as availability is, from the latest read.
+const graph = createShadowGraph({ extractionAvailable: Object.defineProperty(scope => extractionAvailability(scope), 'binding', { get: () => extractionAvailability.binding }), verifier, ...(injectedNow ? { now: injectedNow } : {}) });
 graph.importData(await store.load());
-const embeddingClient = process.env.SHADOWGRAPH_EMBEDDING_URL ? createEmbeddingClient({
-  baseUrl: process.env.SHADOWGRAPH_EMBEDDING_URL,
-  model: process.env.SHADOWGRAPH_EMBEDDING_MODEL,
-  apiKey: process.env.SHADOWGRAPH_EMBEDDING_API_KEY,
-  allowRemote: process.env.SHADOWGRAPH_ALLOW_REMOTE_EMBEDDINGS === '1'
-}) : null;
+const workspace = await discoverWorkspace();
+let embeddingClient = null;
+if (process.env.SHADOWGRAPH_EMBEDDING_URL) {
+  try {
+    const parsedTimeout = Number(process.env.SHADOWGRAPH_EMBEDDING_TIMEOUT_MS);
+    embeddingClient = createEmbeddingClient({
+      baseUrl: process.env.SHADOWGRAPH_EMBEDDING_URL,
+      model: process.env.SHADOWGRAPH_EMBEDDING_MODEL || 'text-embedding-3-small',
+      apiKey: process.env.SHADOWGRAPH_EMBEDDING_API_KEY,
+      allowRemote: process.env.SHADOWGRAPH_ALLOW_REMOTE_EMBEDDINGS === '1',
+      timeoutMs: Number.isFinite(parsedTimeout) && parsedTimeout >= 1 ? Math.trunc(parsedTimeout) : undefined
+    });
+  } catch {
+    embeddingClient = null;
+  }
+}
 let persistQueue = Promise.resolve();
-function persist() { const operation = persistQueue.then(async () => { const revision = await store.save(graph.exportData()); graph.setRevision(revision); }); persistQueue = operation.catch(() => {}); return operation; }
+function persist() { const operation = persistQueue.then(async () => { const revision = await store.save(privilegedSnapshot(graph)); graph.setRevision(revision); }); persistQueue = operation.catch(() => {}); return operation; }
 let callQueue = Promise.resolve();
 function queueCall(operation) { const queued = callQueue.then(operation); callQueue = queued.catch(() => {}); return queued; }
 let persistenceUnavailable = null;
@@ -138,7 +159,7 @@ function committedPersistenceError(persistenceError, durable, reconciliationErro
 }
 
 async function persistCommittedRejection(rejection) {
-  const committed = graph.exportData();
+  const committed = privilegedSnapshot(graph);
   let persistenceError = null;
   try { await persist(); }
   catch (error) { persistenceError = error; }
@@ -167,7 +188,8 @@ const toolCatalog = buildToolCatalog({
   verifier: Boolean(verifier),
   embeddingConfigured: Boolean(process.env.SHADOWGRAPH_EMBEDDING_URL)
 });
-const tools = selectTools(toolCatalog, { compact: process.env.SHADOWGRAPH_MCP_COMPACT === '1' });
+const fullCatalogByName = new Map(toolCatalog.map((tool) => [tool.name, tool]));
+const tools = selectTools(toolCatalog, { compact: process.env.SHADOWGRAPH_MCP_COMPACT === '1', profile: process.env.SHADOWGRAPH_MCP_PROFILE || undefined });
 const toolsByName = new Map(tools.map((tool) => [tool.name, tool]));
 const persistingTools = new Set(tools.filter((tool) => tool.persists).map((tool) => tool.name));
 // One frozen projection per capability tier, built once. tools/list is answered
@@ -217,19 +239,13 @@ function withRuntimeSession(args) {
   return stamped;
 }
 
-async function addConfiguredEmbeddings(args = {}) {
-  if (!embeddingClient) return args;
-  if (Array.isArray(args.operations)) {
-    const operations = [];
-    for (const operation of args.operations) {
-      const needsEmbedding = ['ADD', 'UPDATE'].includes(String(operation.action ?? '').toUpperCase()) && !operation.embedding && typeof operation.text === 'string' && operation.text.trim();
-      operations.push(needsEmbedding ? { ...operation, embedding: await embeddingClient(operation.text) } : operation);
-    }
-    return { ...args, operations };
+async function safeEmbed(text) {
+  if (!embeddingClient || typeof text !== 'string' || !text.trim()) return null;
+  try {
+    return await embeddingClient(text);
+  } catch {
+    return null;
   }
-  return !args.embedding && typeof args.text === 'string' && args.text.trim()
-    ? { ...args, embedding: await embeddingClient(args.text) }
-    : args;
 }
 
 function missingRequiredField(fieldPath) {
@@ -243,32 +259,152 @@ function missingRequiredField(fieldPath) {
 }
 
 function validateRequiredArguments(tool, args) {
+  const input = args && typeof args === 'object' && !Array.isArray(args) ? args : {};
   for (const field of tool.inputSchema.required ?? []) {
-    if (!Object.hasOwn(args, field)) throw missingRequiredField(field);
+    if (!Object.hasOwn(input, field)) throw missingRequiredField(field);
   }
-  if (tool.name === 'shadowgraph_record_decision' && Array.isArray(args.alternatives)) {
-    args.alternatives.forEach((alternative, index) => {
-      if (alternative && typeof alternative === 'object' && !Object.hasOwn(alternative, 'label')) {
+  if (tool.name === 'shadowgraph_record_decision' && Array.isArray(input.alternatives)) {
+    input.alternatives.forEach((alternative, index) => {
+      if (alternative && typeof alternative === 'object' && !Array.isArray(alternative) && !Object.hasOwn(alternative, 'label')) {
         throw missingRequiredField(`alternatives[${index}].label`);
       }
     });
   }
 }
 
-async function callUnqueued(name, args, tier) {
-  if (persistenceUnavailable) throw unavailableError();
-  validateRequiredArguments(toolsByName.get(name), args);
-  const before = graph.exportData();
+async function addConfiguredEmbeddings(args = {}, kind = 'memory') {
+  if (!embeddingClient || !args || typeof args !== 'object') return args;
+  if (kind === 'memory') {
+    if (Array.isArray(args.operations)) {
+      const operations = [];
+      for (const operation of args.operations) {
+        const needsEmbedding = ['ADD', 'UPDATE'].includes(String(operation.action ?? '').toUpperCase()) && !operation.embedding && typeof operation.text === 'string' && operation.text.trim();
+        const emb = needsEmbedding ? await safeEmbed(operation.text) : null;
+        operations.push(emb ? { ...operation, embedding: emb } : operation);
+      }
+      return { ...args, operations };
+    }
+    if (!args.embedding && typeof args.text === 'string' && args.text.trim()) {
+      const emb = await safeEmbed(args.text);
+      return emb ? { ...args, embedding: emb } : args;
+    }
+    return args;
+  }
+  if (args.embedding) return args;
+  let textToEmbed = '';
+  if (kind === 'decision') {
+    textToEmbed = [args.title, args.goal, args.chosen, ...(Array.isArray(args.assumptions) ? args.assumptions : [])].filter((x) => typeof x === 'string' && x.trim()).join(' ');
+  } else if (kind === 'attempt') {
+    textToEmbed = [args.task, args.solution, args.result, args.reason, args.environment].filter((x) => typeof x === 'string' && x.trim()).join(' ');
+  } else if (kind === 'fact') {
+    textToEmbed = [args.key, typeof args.value === 'string' ? args.value : JSON.stringify(args.value ?? '')].filter((x) => typeof x === 'string' && x.trim()).join(' ');
+  }
+  if (!textToEmbed) return args;
+  const emb = await safeEmbed(textToEmbed);
+  return emb ? { ...args, embedding: emb } : args;
+}
+
+const PROJECT_DEFAULTED_TOOLS = new Set([
+  'shadowgraph_record_decision',
+  'shadowgraph_record_attempt',
+  'shadowgraph_record_fact',
+  'shadowgraph_remember',
+  'shadowgraph_recall',
+  'shadowgraph_context',
+  'shadowgraph_review',
+  'shadowgraph_traverse',
+  'shadowgraph_record_outcome',
+  'shadowgraph_update_status',
+  'shadowgraph_confidence_evidence',
+  'shadowgraph_supersede',
+  'shadowgraph_link',
+  'shadowgraph_ack_review',
+  'shadowgraph_reconsider',
+  'shadowgraph_review_context'
+]);
+function withDefaultProject(name, args) {
+  if (!configuredDefaultProject || !PROJECT_DEFAULTED_TOOLS.has(name)) return args;
+  if (!args || typeof args !== 'object' || Array.isArray(args)) return args;
+  if (args.project !== undefined || args.originId !== undefined) return args;
+  return { ...args, project: configuredDefaultProject };
+}
+
+async function syncFromStore() {
+  if (!multiProcessSyncEnabled) return;
+  try {
+    const latest = await store.load();
+    if (Number.isSafeInteger(latest?.revision) && latest.revision > privilegedSnapshot(graph).revision) {
+      graph.replaceData(latest);
+    }
+  } catch {
+    // Fail-open on background pre-call sync check; normal operation/save path handles storage errors.
+  }
+}
+
+// G-5 §8: an expansion answers a store it cannot read with an explicit
+// limitation -- no content, and no failure that blocks the host's work.
+function storeUnavailableExpansion(args) {
+  const recordId = args.recordId;
+  return {
+    recordId, status: 'unavailable', revisionChanged: null, boundRevision: { recordId, digest: args.digest }, currentRevision: null, record: null, investigation: null,
+    completeness: {
+      scope: { project: typeof args.project === 'string' ? args.project : null, requestState: typeof args.project === 'string' ? 'project_selected' : 'project_unresolved', originPresented: typeof args.originId === 'string' && args.originId !== '', grant: null },
+      complete: false,
+      limitation: { code: 'expansion_unavailable', reason: 'store_unavailable', recordId, detail: 'Persistent storage is unavailable until the server restarts, so no record can be served now.' }
+    }
+  };
+}
+
+async function callUnqueued(name, args, tier, accessManaged = false) {
+  extractionAvailability = await readExtractionAvailability({ store, storage: process.env.SHADOWGRAPH_STORAGE ?? 'json' });
+  if (persistenceUnavailable) {
+    // Only a well-formed handle is answered; anything else fails as every tool does.
+    const handle = args && typeof args === 'object' && !Array.isArray(args) && typeof args.recordId === 'string' && args.recordId !== '' && typeof args.digest === 'string' && args.digest !== ''
+      && (args.maxExpansions === undefined || (Number.isInteger(args.maxExpansions) && args.maxExpansions >= 0 && args.maxExpansions <= 50));
+    if (name === 'shadowgraph_expand' && handle) return toolResult(toolsByName.get(name), storeUnavailableExpansion(args), tier);
+    throw unavailableError();
+  }
+  const tool = toolsByName.get(name);
+  if (name === 'shadowgraph_bind' || name === 'shadowgraph_attribute') return toolResult(tool, ownerProposal(name, args), tier);
+  if (!accessManaged && (tool?.accessLifecycle || (tool?.persistsWithAccess && hasAccessReference(args)))) {
+    return currentAccessOperation(graph, store, () => callUnqueued(name, args, tier, true), { read: !tool?.accessLifecycle });
+  }
+  if (args !== undefined) args = withDefaultProject(name, args);
+  if (args && typeof args === 'object' && !Array.isArray(args)) {
+    const { binding: ignoredBinding, surface: ignoredSurface, ...input } = args;
+    args = tool?.persistsWithAccess || tool?.accessLifecycle || ['shadowgraph_record_decision', 'shadowgraph_record_attempt', 'shadowgraph_record_fact', 'shadowgraph_remember', 'shadowgraph_link', 'shadowgraph_supersede', 'shadowgraph_confidence_evidence', 'shadowgraph_record_outcome', 'shadowgraph_update_status', 'shadowgraph_ack_review'].includes(name)
+      ? accessContext(graph, input, 'mcp', workspace) : input;
+    if (name === 'shadowgraph_verify_fact' && input.project == null) {
+      const { binding } = accessContext(graph, input, 'mcp', workspace);
+      if (binding) args = { ...input, project: binding.project };
+    }
+  }
+  validateRequiredArguments(tool, args);
+  if (name === 'shadowgraph_record_decision') args = await addConfiguredEmbeddings(args, 'decision');
+  else if (name === 'shadowgraph_record_attempt') args = await addConfiguredEmbeddings(args, 'attempt');
+  else if (name === 'shadowgraph_remember') args = await addConfiguredEmbeddings(args ?? {}, 'memory');
+  else if (name === 'shadowgraph_record_fact') args = await addConfiguredEmbeddings(args, 'fact');
+  if (name !== 'shadowgraph_restore') await syncFromStore();
+  const before = privilegedSnapshot(graph);
   let value;
   try {
-  if (name === 'shadowgraph_record_decision') value = graph.addDecision(withRuntimeSession(args));
+  if (name === 'shadowgraph_request_wider_access') value = graph.requestAccess(args ?? {});
+  else if (name === 'shadowgraph_revoke_grant') value = graph.revokeAccess(args ?? {});
+  else if (name === 'shadowgraph_discard_access') value = graph.discardAccess(args ?? {});
+  else if (name === 'shadowgraph_record_decision') {
+    const decisionInput = args && typeof args === 'object' && !Array.isArray(args) && !args.chosen && args.title
+      ? { ...args, chosen: args.title }
+      : args;
+    value = graph.addDecision(withRuntimeSession(decisionInput));
+  }
   else if (name === 'shadowgraph_record_attempt') value = graph.addAttempt(withRuntimeSession(args));
   else if (name === 'shadowgraph_review') value = graph.review(args ?? {});
   else if (name === 'shadowgraph_reconsider') value = graph.reconsider(args ?? {});
   else if (name === 'shadowgraph_search') value = graph.search(args?.query ?? '', args ?? {});
   else if (name === 'shadowgraph_context') value = graph.context(args ?? {});
+  else if (name === 'shadowgraph_review_context') value = graph.reviewContext(args ?? {});
   else if (name === 'shadowgraph_remember') {
-    const prepared = withRuntimeSession(await addConfiguredEmbeddings(args ?? {}));
+    const prepared = withRuntimeSession(args ?? {});
     value = Array.isArray(prepared.operations) ? graph.applyMemoryPlan(prepared) : graph.remember(prepared);
   }
   else if (name === 'shadowgraph_recall') {
@@ -284,28 +420,57 @@ async function callUnqueued(name, args, tier) {
   }
   else if (name === 'shadowgraph_record_fact') value = graph.addFact(withRuntimeSession(args));
   else if (name === 'shadowgraph_verify_fact' && verifier) value = await graph.verifyFact(args ?? {});
-  else if (name === 'shadowgraph_record_outcome') value = graph.setOutcome(args?.decisionId, args?.outcome);
+  else if (name === 'shadowgraph_record_outcome') {
+    let outcomePayload = args?.outcome && typeof args.outcome === 'object' && !Array.isArray(args.outcome)
+      ? {
+          ...args.outcome,
+          ...(args.decisionStatus !== undefined && args.outcome.decisionStatus === undefined ? { decisionStatus: args.decisionStatus } : {}),
+          ...(args.lifecycleStatus !== undefined && args.outcome.lifecycleStatus === undefined ? { lifecycleStatus: args.lifecycleStatus } : {}),
+          ...(args.autoTransition !== undefined && args.outcome.autoTransition === undefined ? { autoTransition: args.autoTransition } : {})
+        }
+      : args?.outcome;
+    if (outcomePayload && typeof outcomePayload === 'object' && !outcomePayload.status && outcomePayload.success !== undefined) {
+      outcomePayload = { ...outcomePayload, status: outcomePayload.success ? 'successful' : 'failed' };
+    }
+    const targetDecisionId = args?.decisionId ?? args?.id;
+    value = graph.setOutcome(targetDecisionId, outcomePayload, args);
+  }
   else if (name === 'shadowgraph_confidence_evidence') value = graph.addConfidenceEvidence(withRuntimeSession(args ?? {}));
-  else if (name === 'shadowgraph_update_status') value = graph.updateDecisionStatus(args?.decisionId, args?.status);
+  else if (name === 'shadowgraph_update_status') value = graph.updateDecisionStatus(args?.decisionId, args?.status, args);
   else if (name === 'shadowgraph_link') value = graph.link(args);
   else if (name === 'shadowgraph_traverse') value = graph.traverse(args ?? {});
+  else if (name === 'shadowgraph_expand') value = graph.expand(args ?? {});
   else if (name === 'shadowgraph_supersede') value = graph.supersedeDecision(args ?? {});
   else if (name === 'shadowgraph_redact') value = graph.redact(args ?? {});
   else if (name === 'shadowgraph_purge') value = graph.purgeProject(args?.project, { mode: args?.mode });
   else if (name === 'shadowgraph_maintain') value = graph.maintain(args ?? {});
   else if (name === 'shadowgraph_retrieve') value = graph.retrieve(args?.query ?? '', args ?? {});
-  else if (name === 'shadowgraph_validate') value = graph.validate();
+  else if (name === 'shadowgraph_validate') value = graph.validate(args ?? {});
   else if (name === 'shadowgraph_journal') value = graph.getJournal(args ?? {});
   else if (name === 'shadowgraph_rebuild') value = graph.rebuild(args ?? {});
   else if (name === 'shadowgraph_review_signals') value = graph.getReviewSignals(args ?? {});
   else if (name === 'shadowgraph_purge_preview') value = graph.projectSummary(args?.project);
-  else if (name === 'shadowgraph_ack_review') value = graph.acknowledgeReview(args?.id);
-  else if (name === 'shadowgraph_repair_plan') value = graph.repairPlan();
-  else if (name === 'shadowgraph_backup') { const { backupFile } = await import('./backup.js'); value = await backupFile(file, args?.destination, { store }); }
+  else if (name === 'shadowgraph_ack_review') {
+    if (args?.id !== undefined && args?.reviewSignalId !== undefined && args.id !== args.reviewSignalId) {
+      throw new Error('Conflicting id and reviewSignalId provided');
+    }
+    const resolvedId = args?.id ?? args?.reviewSignalId;
+    value = graph.acknowledgeReview(resolvedId, args);
+  }
+  else if (name === 'shadowgraph_repair_plan') value = graph.repairPlan(args ?? {});
+  else if (name === 'shadowgraph_backup') {
+    // A missing destination would otherwise write a file named `undefined` (post-merge review R1-5).
+    if (typeof args?.destination !== 'string' || !args.destination.trim()) throw new Error('destination must be a non-empty string');
+    const { backupFile } = await import('./backup.js'); value = await backupFile(file, args.destination, { store });
+  }
   else if (name === 'shadowgraph_restore') {
+    if (typeof args?.source !== 'string' || !args.source.trim()) throw new Error('source must be a non-empty string');
+    if (args?.memoryOnly !== undefined && typeof args.memoryOnly !== 'boolean') throw new Error('memoryOnly must be a boolean');
     value = store.restore
-      ? await store.restore(args?.source, { validate: restoreValidator, afterReplace: (payload) => graph.replaceData(payload) })
+      ? await store.restore(args?.source, { memoryOnly: args?.memoryOnly === true, validate: restoreValidator, verifier: verifier ?? undefined, afterReplace: (payload) => graph.replaceData(payload) })
       : await (await import('./backup.js')).restoreFile(args?.source, file, {
+        memoryOnly: args?.memoryOnly === true,
+        verifier: verifier ?? undefined,
         storage: process.env.SHADOWGRAPH_STORAGE,
         validate: restoreValidator,
         restoreFs: injectedRestoreFs,
@@ -317,6 +482,7 @@ async function callUnqueued(name, args, tier) {
   else { const error = new Error('Unknown tool'); error.code = -32601; throw error; }
   } catch (error) {
     if (isCommittedRejection(error)) {
+      if (accessManaged) throw error;
       return persistCommittedRejection(error);
     }
     // P1-4: persistence rollback is too late for a domain operation that mutates
@@ -352,7 +518,7 @@ async function callUnqueued(name, args, tier) {
   // Which tools need a durable save is declared once, per tool, in the catalog.
   // shadowgraph_restore is deliberately absent: the storage backend commits the
   // replacement itself. See src/mcp-tools.js.
-  if (persistingTools.has(name)) {
+  if (!accessManaged && persistingTools.has(name)) {
     try { await persist(); }
     catch (error) {
       try { graph.replaceData(await store.load()); }
@@ -370,6 +536,18 @@ function call(name, args, tier) { return queueCall(() => callUnqueued(name, args
 const RESOURCE_URIS = new Set(['shadowgraph://context']);
 const PROMPT_NAMES = new Set(['shadowgraph_consequential_task']);
 const SERVER_INFO = Object.freeze({ name: 'shadowgraph', version: MCP_VERSION });
+// Both discovery eras must give clients the same navigation and effect guidance.
+// Instructions are an optional InitializeResult member in every supported
+// handshake revision; they do not change the advertised catalog or authority.
+const SERVER_INSTRUCTIONS = [
+  "Local-first decision and scoped temporal memory. Session tools/list defines the callable tools, schemas and effect hints.",
+  "Literal every-term lookup: shadowgraph_search. Ranked experience: shadowgraph_recall. Content matches plus ordered graph neighbours: shadowgraph_retrieve. Project working set: shadowgraph_context. Full record behind a context line: shadowgraph_expand, with the returned expansion handle.",
+  "A review signal records that a decision needs revisiting. Reopen rules are saved conditions on rejected alternatives. shadowgraph_review rechecks conditions and saves review signals; shadowgraph_review_context also loads the working set; shadowgraph_reconsider rechecks and explains all verdicts, including unresolved conditions. These evaluation calls commit a revision even on repeats. shadowgraph_context does not save review signals.",
+  "shadowgraph_review_signals, when advertised, lists already-saved review signals without reevaluation or signal creation. shadowgraph_ack_review accepts id or reviewSignalId to acknowledge the saved signal. Reading saved signals and evaluating conditions have different effects.",
+  "Chosen approach: shadowgraph_record_decision. Tried action and result: shadowgraph_record_attempt. Project/key observation for conditions: shadowgraph_record_fact. Scoped reusable memory: shadowgraph_remember. What happened to an existing decision: shadowgraph_record_outcome. Supporting or contradicting evidence: shadowgraph_confidence_evidence, when advertised. Lifecycle transition: shadowgraph_update_status. Replacement relation between decisions: shadowgraph_supersede.",
+  "Read-capable tools accepting accessId or grantId can save a bounded audit and revision when a key is presented. A grant widens reads, never write authority. IDs do not supply project/origin scope. Returned completeness and provenance describe the result limits.",
+  "Full-only operator capabilities require an operator-selected Full session and reconnect. A named sibling is callable only when advertised. Profiles change advertisement, not stored memory or product capabilities."
+].join('\n');
 const SERVER_CAPABILITIES = Object.freeze({
   tools: Object.freeze({ listChanged: false }),
   resources: Object.freeze({ listChanged: false, subscribe: false }),
@@ -414,6 +592,7 @@ const PUBLIC_RPC_FALLBACK_MESSAGES = new Map([
 // Only stable codes documented by the storage/journal contracts cross the MCP
 // boundary. In particular, platform codes such as ENOENT/EACCES are private.
 const PUBLIC_DOMAIN_CODES = new Set([
+  'creation_id_not_allowed',
   'committed_rejection_persistence_unconfirmed',
   'duplicate_hard_purge_ledger_sequence',
   'duplicate_journal_sequence',
@@ -435,21 +614,87 @@ const PUBLIC_DOMAIN_CODES = new Set([
   'storage_lock_timeout',
   'unexplained_journal_gap',
   'unrelated_hard_purge_ledger_sequence',
-  'unsupported_schema_version'
+  'unsupported_schema_version',
+  // The deletion-knowledge refusals (PR-37a): codes only, never a path,
+  // project or token.
+  ...DELETION_CODES
 ]);
 const PUBLIC_DOMAIN_MESSAGES = new Set([
   'A caller cannot set fact verificationStatus to verified',
   'A caller cannot set fact verificationStatus to expired',
   'Invalid fact verificationStatus',
   'Purge mode must be logical or hard',
-  'Outcome status must be successful, mixed, failed, or unknown'
+  'Outcome status must be successful, mixed, failed, or unknown',
+  'Decision not found',
+  'Review signal not found',
+  'Conflicting id and reviewSignalId provided',
+  'Conflicting key and target in rule condition',
+  'Conflicting value and expected in rule condition',
+  'Conflicting condition aliases: key and target must not conflict',
+  'Conflicting condition aliases: value and expected must not conflict',
+  'A structured rule requires a non-empty key',
+  'A reopen/reuse rule must be a string or an object',
+  'A relationship requires from, to, and relation',
+  'Relation endpoints must exist in the scope the relation is written for',
+  'Supersession requires two existing decisions',
+  'A decision cannot supersede itself',
+  'Supersession would create an invalid decision chain',
+  'Confidence evidence requires a non-empty reason',
+  'Confidence evidence requires a stable `key` so a retry cannot double-count',
+  'A fact requires a non-empty key',
+  'Fact confidence must be a number between 0 and 1',
+  'destination must be a non-empty string',
+  'source must be a non-empty string',
+  'memoryOnly must be a boolean',
+  'A grant is never write authority for a binding or an attribution',
+  'type must be worktree or shared_repository',
+  'targetProject must be a non-empty string',
+  'reason must be a non-empty string',
+  'Decision status stale is system-owned and can only be produced by maintain()',
+  'Decision status superseded is system-owned and can only be produced by supersedeDecision()',
+  'Attempt not found',
+  'Fact not found'
 ]);
+const PUBLIC_DOMAIN_PATTERNS = [
+  /^A structured rule requires a value for operator /u,
+  /^Unsupported rule operator /u,
+  /^Unsupported rule unit /u,
+  /^Invalid decision status: /u
+];
 const SAFE_CALLER_ERRORS = [
   { matches: (message) => message === 'Decision not found', issueCode: 'unknown_decision', fieldPath: 'decisionId' },
   { matches: (message) => message.startsWith('Illegal decision status transition:'), issueCode: 'illegal_transition', fieldPath: 'status' },
   { matches: (message) => message.startsWith('Invalid decision status:'), issueCode: 'invalid_field', fieldPath: 'status' },
   { matches: (message) => message.startsWith('Attempt resultClass must be '), issueCode: 'invalid_field', fieldPath: 'resultClass' }
 ];
+
+function containsPathOrSecret(str) {
+  if (typeof str !== 'string') return false;
+  if (/[a-zA-Z]:[\\/]/u.test(str)) return true;
+  if (str.includes('\\\\')) return true;
+  if (/(?:\.\.[\\/]|[\\/]\.\.)/u.test(str)) return true;
+  if (/(?:[\\/](?:Users|home|tmp|var|etc|usr|opt|bin|Windows|Program Files)\b|\b(?:Users|home|tmp|var|etc|usr|opt|bin|Windows|Program Files)[\\/])/iu.test(str)) return true;
+  if (/^\/[a-zA-Z0-9_.-]+(?:\/[a-zA-Z0-9_.-]+)+/u.test(str)) return true;
+  if (/(?:password|secret|bearer\s+[^\s]+|api[-_]?key|private[-_]?key)/iu.test(str)) return true;
+  return false;
+}
+
+function profileHiddenError(name) {
+  const isWorkflow = process.env.SHADOWGRAPH_MCP_PROFILE === 'workflow';
+  const isCompact = process.env.SHADOWGRAPH_MCP_COMPACT === '1';
+  let message;
+  if (isWorkflow) {
+    message = `Tool "${name}" is excluded by active workflow profile (20 tools). For full-mode tools, ask operator to unset SHADOWGRAPH_MCP_PROFILE and restart with SHADOWGRAPH_MCP_COMPACT=0.`;
+  } else if (isCompact) {
+    message = `Tool "${name}" is excluded by active compact profile (16 tools). For full-mode tools, ask operator to restart with SHADOWGRAPH_MCP_COMPACT=0.`;
+  } else {
+    message = `Tool "${name}" is excluded by active profile. For full-mode tools, ask operator to restart with SHADOWGRAPH_MCP_COMPACT=0.`;
+  }
+  const error = new Error(message);
+  error.code = -32601;
+  error[JSON_RPC_ERROR] = true;
+  return tagPublicError(error, message);
+}
 const PUBLIC_ERROR_NAME_MESSAGES = new Map([
   ['RevisionConflictError', 'Storage revision conflict']
 ]);
@@ -506,9 +751,43 @@ function publicDomainCode(error) {
   return null;
 }
 
+// Owner decision D3 (2026-10-08): in full mode, bind and attribute only
+// propose. Nothing is written, applied or looked up: no binding file, store
+// entry, journal event or audit, and no lookup of the named identifiers, so a
+// proposal neither changes ownership or bindings nor tells the caller whether a
+// record exists. The owner applies one with the CLI verb, which shows it and
+// asks for confirmation at a terminal.
+function ownerProposal(name, args) {
+  const input = args && typeof args === 'object' && !Array.isArray(args) ? args : {};
+  const text = (value, field) => {
+    if (typeof value !== 'string' || !value.trim()) throw new Error(`${field} must be a non-empty string`);
+    return value;
+  };
+  if (input.accessId !== undefined || input.grantId !== undefined) throw new Error('A grant is never write authority for a binding or an attribution');
+  if (name === 'shadowgraph_bind') {
+    if (!['worktree', 'shared_repository'].includes(input.type)) throw new Error('type must be worktree or shared_repository');
+    return { proposal: true, applied: false, action: 'bind',
+      ownerCommand: { verb: 'bind', input: { project: text(input.project, 'project'), reason: text(input.reason, 'reason') }, mappingType: input.type },
+      note: `Nothing changed. The owner applies this with \`shadowgraph bind <input as JSON>\` in this workspace, chooses ${input.type} and confirms at a terminal.` };
+  }
+  const byIds = input.ids !== undefined;
+  if (byIds === (input.originId !== undefined)) throw new Error('Supply either ids or one originId');
+  if (byIds && (!Array.isArray(input.ids) || !input.ids.length || input.ids.some((id) => typeof id !== 'string' || !id.trim()))) throw new Error('ids must be non-empty strings');
+  const selection = byIds ? { ids: [...new Set(input.ids)] } : { originId: text(input.originId, 'originId') };
+  return { proposal: true, applied: false, action: 'attribute',
+    ownerCommand: { verb: 'attribute', input: { ...selection, targetProject: text(input.targetProject, 'targetProject'), reason: text(input.reason, 'reason') } },
+    note: 'Nothing changed, and the identifiers were not looked up. The owner applies this with `shadowgraph attribute <input as JSON>`, which shows it and asks for confirmation at a terminal.' };
+}
+
 function publicErrorDetails(error) {
+  if (error?.code === 'creation_id_not_allowed') return { message: 'Caller-supplied creation IDs are not supported' };
   const tagged = error?.[PUBLIC_ERROR];
-  if (tagged) return tagged;
+  if (tagged) {
+    if (tagged.message && containsPathOrSecret(tagged.message)) {
+      return { message: 'Tool execution failed' };
+    }
+    return tagged;
+  }
 
   const issueCode = publicDomainCode(error);
   if (issueCode) {
@@ -533,8 +812,17 @@ function publicErrorDetails(error) {
       data: { issueCode: callerError.issueCode, fieldPath: callerError.fieldPath, retryable: false }
     };
   }
-  if (PUBLIC_DOMAIN_MESSAGES.has(message)) return { message };
+  if (message && !containsPathOrSecret(message)) {
+    if (PUBLIC_DOMAIN_MESSAGES.has(message)) return { message };
+    for (const pattern of PUBLIC_DOMAIN_PATTERNS) {
+      if (pattern.test(message)) return { message };
+    }
+  }
   return { message: 'Tool execution failed' };
+}
+
+function publicErrorMessage(error) {
+  return publicErrorDetails(error).message;
 }
 
 // The wire shape of one JSON-RPC response. Building it separately from writing
@@ -600,8 +888,13 @@ function eraResult(modern, result, cacheScope) {
 }
 
 const resourceList = [{ uri: 'shadowgraph://context', name: 'ShadowGraph context', description: 'Current project context and open review signals.', mimeType: 'application/json' }];
-const promptList = [{ name: 'shadowgraph_consequential_task', description: 'Use ShadowGraph before, during, and after consequential work.', arguments: [] }];
-const promptText = `${verifier ? 'Only the separately configured signed local-evidence verifier can mark an active fact verified.' : 'Without a separately configured verifier, nothing in ShadowGraph can be marked verified.'} Before work, use one stable project and scope, call context, and use retrieve or recall for targeted history. During work, record decisions and informative attempts with explicit resultClass, reason, environment, and retry keys chosen before the first write. Record changed facts under reopen-rule keys. After work, record outcomes, update or supersede obsolete decisions, maintain time-sensitive state, and acknowledge reviews only when seen; acknowledgement does not resolve the decision. Treat agent_claimed and unverified facts as hypotheses.`;
+const promptList = [{ name: 'shadowgraph_consequential_task', description: 'What ShadowGraph records and returns about decisions, facts, attempts and outcomes.', arguments: [] }];
+// Plan v1.4.4 PR-19 (PC-01(a), AC-026): the prompt states what ShadowGraph holds
+// and returns; it gives no instruction about the work.
+const PROMPT_FACTS = "context returns one project's current decisions, stale facts, failed attempts, fired review conditions and conditions that could not be settled; retrieve returns the records matching a content query with their one-hop graph neighbours. ShadowGraph records decisions, assumptions, evidence, alternatives, attempts, facts and outcomes. A review signal stays open until it is acknowledged. agent_claimed and unverified facts are claims, not confirmations.";
+const promptText = verifier
+  ? `${PROMPT_FACTS} Only the separately configured signed local-evidence verifier can mark an active fact verified.`
+  : `${PROMPT_FACTS} Without a separately configured verifier nothing in ShadowGraph can be marked verified, so a stored claim is never a confirmation.`;
 
 // Handles one already-parsed JSON-RPC message. `emit` receives the response
 // object exactly once for a request and never for a notification, so a single
@@ -611,7 +904,7 @@ const promptText = `${verifier ? 'Only the separately configured signed local-ev
 // The old code fell through to `reply(request.id, {})` for any unrecognised
 // method, emitting `{"id": null, "result": {}}` for notifications — a protocol
 // violation that a strict client can treat as a spurious response.
-async function handleMessage(request, emit) {
+async function handleMessage(request, emit, batchFailure = null) {
   let isNotification = false;
   try {
     if (!request || typeof request !== 'object' || Array.isArray(request)) throw rpcError(-32600, 'Invalid Request');
@@ -627,6 +920,16 @@ async function handleMessage(request, emit) {
       if (!isNotification) emit(responseFor(request.id, result, error));
     };
     const modern = requestUsesModernProtocol(request);
+    // No member of a creation-policy-invalid batch may run, including reads
+    // with durable effects and notifications. Preserve each protocol's error
+    // envelope without entering the shared mutation queue.
+    if (batchFailure) {
+      if (modern && request.method === 'tools/call') {
+        respond(modernResult({ content: [{ type: 'text', text: publicErrorMessage(batchFailure) }], isError: true }));
+        return;
+      }
+      throw batchFailure;
+    }
 
     if (persistenceUnavailable && request.method === 'resources/read') throw unavailableError();
 
@@ -659,7 +962,7 @@ async function handleMessage(request, emit) {
         legacyTier = metadataTierForProtocolVersion(negotiated);
         batchesAccepted = BATCH_PROTOCOL_VERSIONS.includes(negotiated);
       }
-      respond({ protocolVersion: negotiated, capabilities: SERVER_CAPABILITIES, serverInfo: SERVER_INFO });
+      respond({ protocolVersion: negotiated, capabilities: SERVER_CAPABILITIES, serverInfo: SERVER_INFO, instructions: SERVER_INSTRUCTIONS });
     } else if (request.method.startsWith('notifications/')) {
       // Method names do not define notifications; absence of id does. A client
       // that explicitly supplies id:null sent a request and still gets a reply.
@@ -669,7 +972,7 @@ async function handleMessage(request, emit) {
       respond(modernResult({
         supportedVersions: [...SUPPORTED_PROTOCOL_VERSIONS],
         capabilities: SERVER_CAPABILITIES,
-        instructions: 'Local-first explainable decision and scoped temporal memory. Before work, use one stable project and scope, call context, and use retrieve or recall for targeted history. During work, record decisions, informative attempts, and changed facts under reopen-rule keys. After work, record outcomes, update or supersede obsolete decisions, maintain time-sensitive state, and acknowledge reviews only when seen; acknowledgement does not resolve the decision. Treat agent_claimed and unverified facts as hypotheses; only a separately configured signed local-evidence verifier can mark an active fact verified.'
+        instructions: SERVER_INSTRUCTIONS
       }, 'public'));
     } else if (request.method === 'tools/list') respond(eraResult(modern, { tools: toolLists[modern ? METADATA_TIER.STRUCTURED : legacyTier] }, 'public'));
     else if (request.method === 'resources/list') respond(eraResult(modern, { resources: resourceList }, 'public'));
@@ -688,17 +991,10 @@ async function handleMessage(request, emit) {
         // makes the latch closed rather than merely early. callUnqueued does the
         // same for tools/call.
         if (persistenceUnavailable) throw unavailableError();
-        const before = graph.exportData();
-        let value;
-        try { value = graph.context({}); }
-        catch (error) { graph.replaceData(before); throw error; }
-        try { await persist(); }
-        catch (error) {
-          try { graph.replaceData(await store.load()); }
-          catch { graph.replaceData(before); }
-          throw error;
-        }
-        return value;
+        extractionAvailability = await readExtractionAvailability({ store, storage: process.env.SHADOWGRAPH_STORAGE ?? 'json' });
+        // The context resource is the default-path read (plan v1.4.4 §13.2): it
+        // changes no canonical truth, so nothing is persisted after it.
+        return graph.context(accessContext(graph, {}, 'mcp', workspace));
       });
       respond(eraResult(modern, { contents: [{ uri, mimeType: 'application/json', text: JSON.stringify(context) }] }, 'private'));
     } else if (request.method === 'prompts/list') respond(eraResult(modern, { prompts: promptList }, 'public'));
@@ -707,13 +1003,19 @@ async function handleMessage(request, emit) {
       const promptName = request.params?.name;
       if (typeof promptName !== 'string' || !promptName) throw rpcError(-32602, 'Invalid params: name is required');
       if (!PROMPT_NAMES.has(promptName)) throw rpcError(-32602, 'Unknown prompt');
-      respond(eraResult(modern, { description: 'ShadowGraph operating policy', messages: [{ role: 'user', content: { type: 'text', text: promptText } }] }));
+      respond(eraResult(modern, { description: 'What ShadowGraph records and returns', messages: [{ role: 'user', content: { type: 'text', text: promptText } }] }));
     } else if (request.method === 'tools/call') {
       if (request.params === undefined) throw rpcError(-32602, 'Invalid params: params is required for tools/call');
       if (typeof request.params.name !== 'string' || !request.params.name) throw rpcError(-32602, 'Invalid params: name is required for tools/call');
       const args = request.params.arguments ?? {};
       if (typeof args !== 'object' || args === null || Array.isArray(args)) throw rpcError(-32602, 'Invalid params: arguments must be an object');
       if (!toolsByName.has(request.params.name)) {
+        if (!persistenceUnavailable && ['shadowgraph_issue_access', 'shadowgraph_delegate_access', 'shadowgraph_grant', 'shadowgraph_delegate', 'shadowgraph_import'].includes(request.params.name)) {
+          await queueCall(() => currentAccessOperation(graph, store, () => privilegedAccessRefusal(graph, { surface: 'mcp', reason: 'issuance_surface_unavailable' })));
+        }
+        if (fullCatalogByName.has(request.params.name)) {
+          throw profileHiddenError(request.params.name);
+        }
         throw rpcError(modern ? -32602 : -32601, 'Unknown tool');
       }
       try {
@@ -721,6 +1023,7 @@ async function handleMessage(request, emit) {
         // revision that defines it, or to a modern `_meta` request, and only for
         // a tool that advertises an output schema at that tier. A failed call
         // stays content-only.
+        assertToolCreationInput(request.params.name, args);
         const result = await call(request.params.name, args, modern ? METADATA_TIER.STRUCTURED : legacyTier);
         respond(eraResult(modern, modern ? { ...result, isError: false } : result));
       } catch (error) {
@@ -761,8 +1064,14 @@ async function handleBatch(batch) {
     writeLine(responseFor(null, null, rpcError(-32600, 'Invalid Request')));
     return;
   }
+  let batchFailure = null;
+  try {
+    for (const member of batch) {
+      if (member?.method === 'tools/call') assertToolCreationInput(member.params?.name, member.params?.arguments);
+    }
+  } catch (error) { batchFailure = error; }
   const collected = batch.map(() => []);
-  const settled = batch.map((member, index) => handleMessage(member, (response) => collected[index].push(response)));
+  const settled = batch.map((member, index) => handleMessage(member, (response) => collected[index].push(response), batchFailure));
   await Promise.all(settled);
   const responses = collected.flat();
   if (responses.length) writeLine(responses);

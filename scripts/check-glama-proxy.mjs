@@ -36,10 +36,9 @@ const MCP_PROXY_VERSION = '6.4.3';
 // older revision fails here instead of quietly shrinking what Glama can see.
 const PROXY_REQUESTED_PROTOCOL_VERSION = '2025-11-25';
 const EXPECTED_NEGOTIATED_PROTOCOL_VERSION = '2025-11-25';
-const EXPECTED_TOOL_COUNT = 28;
-// These two return a bare JSON array, so they cannot carry an object-rooted
-// output schema. See src/mcp-tools.js and docs/mcp-compatibility.md.
-const OUTPUT_SCHEMA_OMITTED = new Set(['shadowgraph_review', 'shadowgraph_review_signals']);
+const EXPECTED_TOOL_COUNT = 35;
+// Every tool now has an object envelope and output schema.
+const OUTPUT_SCHEMA_OMITTED = new Set();
 const ANNOTATION_HINTS = ['readOnlyHint', 'destructiveHint', 'idempotentHint', 'openWorldHint'];
 
 const SELF = fileURLToPath(import.meta.url);

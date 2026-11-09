@@ -10,6 +10,7 @@ import { createShadowGraph } from '../src/shadowgraph.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
 import { createJsonFileStore } from '../src/storage.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
+import { privilegedSnapshot } from '../src/internal/snapshot.js';
 
 const NODE_SQLITE = (await getRuntimeCapabilities()).nodeSqlite;
 const SQLITE_TEST_OPTIONS = NODE_SQLITE.available ? {} : { skip: NODE_SQLITE.reason };
@@ -24,7 +25,7 @@ const LAG_HIGH = { key: 'lag', operator: 'gte', value: 1000 };
 
 function seedGraph({ rules = [LAG_LOW, LAG_HIGH] } = {}) {
   const graph = createShadowGraph();
-  graph.addDecision({
+  graph.importData({ records: [{ kind: 'decision',
     project: 'p', id: 'decision:d1', title: 'Serve reads from the local replica', chosen: 'local-replica',
     alternatives: rules.map((rule, index) => ({
       id: `alternative:a${index + 1}`,
@@ -32,7 +33,7 @@ function seedGraph({ rules = [LAG_LOW, LAG_HIGH] } = {}) {
       reasonRejected: 'was acceptable',
       reopenWhen: [rule]
     }))
-  });
+   }] });
   return graph;
 }
 
@@ -71,7 +72,7 @@ function legacyAcknowledgedSignal({ withConditions = true } = {}) {
 // Build a graph holding the legacy signal, then observe `lag`.
 function graphWithLegacySignal({ withConditions = true, lag = 1200 } = {}) {
   const seed = seedGraph();
-  const snapshot = seed.exportData();
+  const snapshot = privilegedSnapshot(seed);
   snapshot.reviewSignals = [legacyAcknowledgedSignal({ withConditions })];
   const graph = createShadowGraph();
   graph.importData(snapshot);
@@ -79,7 +80,7 @@ function graphWithLegacySignal({ withConditions = true, lag = 1200 } = {}) {
   return graph;
 }
 
-const openReview = (graph) => graph.context({ project: 'p' }).openReviews[0];
+const openReview = (graph) => graph.reviewContext({ project: 'p' }).openReviews[0];
 
 // ---------------------------------------------------------------------------
 // HIGH 1 -- a legacy acknowledgement must never be widened to cover conditions
@@ -90,7 +91,7 @@ test('a legacy acknowledgement with no recorded conditions never covers a curren
   const graph = graphWithLegacySignal({ withConditions: false });
 
   assert.equal(openReview(graph).reviewSignalStatus, 'open', 'unknown historical scope cannot acknowledge anything');
-  const legacy = graph.getReviewSignals({ project: 'p' }).find((item) => item.id === 'review:legacy');
+  const legacy = graph.getReviewSignals({ project: 'p' }).items.find((item) => item.id === 'review:legacy');
   assert.ok(legacy, 'the legacy signal is kept as historical data');
   assert.equal(legacy.status, 'acknowledged', 'and is not rewritten');
   assert.equal(legacy.coverage, undefined, 'and is not stamped with coverage it never had');
@@ -100,7 +101,7 @@ test('a legacy acknowledgement is not widened onto a broader current breach set'
   const graph = graphWithLegacySignal({ lag: 1200 });
 
   assert.equal(openReview(graph).reviewSignalStatus, 'open', 'lag >= 1000 was never acknowledged');
-  const legacy = graph.getReviewSignals({ project: 'p' }).find((item) => item.id === 'review:legacy');
+  const legacy = graph.getReviewSignals({ project: 'p' }).items.find((item) => item.id === 'review:legacy');
   assert.equal(legacy.status, 'acknowledged', 'the legacy signal is preserved unchanged');
   assert.equal(legacy.coverage, undefined, 'and is never stamped with a wider coverage set');
 });
@@ -131,7 +132,7 @@ test('legacy acknowledgement coverage survives export, import and restart', asyn
   const store = createJsonFileStore(join(directory, 'graph.json'));
   const graph = graphWithLegacySignal({ lag: 600 });
   assert.equal(openReview(graph).reviewSignalStatus, 'acknowledged');
-  await store.save(graph.exportData());
+  await store.save(privilegedSnapshot(graph));
 
   const restored = createShadowGraph();
   restored.importData(await store.load());
@@ -144,7 +145,7 @@ test('legacy acknowledgement coverage survives export, import and restart', asyn
 test('legacy acknowledgement handling is identical on JSON and SQLite', async (t) => {
   const directory = await scratchDirectory(t, 'legacy-ack-parity-');
   const source = graphWithLegacySignal({ lag: 600 });
-  const snapshot = source.exportData();
+  const snapshot = privilegedSnapshot(source);
   const results = {};
 
   for (const backend of ['json', 'sqlite']) {
@@ -161,7 +162,7 @@ test('legacy acknowledgement handling is identical on JSON and SQLite', async (t
       const graph = createShadowGraph();
       graph.importData(durable);
       const narrow = openReview(graph);
-      graph.addFact({ project: 'p', key: 'lag', value: 1200, id: 'fact:broad' });
+      graph.addFact({ project: 'p', key: 'lag', value: 1200, });
       const broad = openReview(graph);
       results[backend] = [narrow.reviewSignalId, narrow.reviewSignalStatus, broad.reviewSignalStatus];
     });
@@ -181,10 +182,10 @@ test('the compact list and acknowledge flow settles the new breach without touch
   assert.equal(listed.reviewSignalStatus, 'open');
   assert.notEqual(listed.reviewSignalId, 'review:legacy', 'the new breach set has its own signal');
 
-  graph.acknowledgeReview(listed.reviewSignalId);
+  graph.acknowledgeReview(listed.reviewSignalId, { project: 'p' });
   assert.equal(openReview(graph).reviewSignalStatus, 'acknowledged', 'acknowledging it settles it');
 
-  const legacy = graph.getReviewSignals({ project: 'p' }).find((item) => item.id === 'review:legacy');
+  const legacy = graph.getReviewSignals({ project: 'p' }).items.find((item) => item.id === 'review:legacy');
   assert.equal(legacy.status, 'acknowledged');
   assert.equal(legacy.acknowledgedAt, '2026-01-02T00:00:00.000Z', 'the historical record is untouched');
 });
@@ -199,11 +200,11 @@ test('the compact list and acknowledge flow settles the new breach without touch
 // response can carry it and must not carry it by reference.
 function graphWithObjectRuleMetadata() {
   const seed = createShadowGraph();
-  seed.addDecision({
+  seed.importData({ records: [{ kind: 'decision',
     project: 'p', id: 'decision:d1', title: 't', chosen: 'c',
     alternatives: [{ id: 'alternative:a1', label: 'alt-1', reasonRejected: 'r', reopenWhen: [{ key: 'lag', operator: 'gte', value: 500 }] }]
-  });
-  const snapshot = seed.exportData();
+   }] });
+  const snapshot = privilegedSnapshot(seed);
   snapshot.records[0].alternatives[0].reopenWhen = [{
     key: 'lag',
     operator: { name: ['gte'] },
@@ -216,14 +217,14 @@ function graphWithObjectRuleMetadata() {
   return graph;
 }
 
-const objectOperatorCondition = (graph) => graph.context({ project: 'p' }).conditionDiagnostics
+const objectOperatorCondition = (graph) => graph.reviewContext({ project: 'p' }).conditionDiagnostics
   .flatMap((item) => item.conditions)
   .find((item) => item.operator && typeof item.operator === 'object');
 
 test('object-valued operator and unit from a lenient import are detached', () => {
   const graph = graphWithObjectRuleMetadata();
-  graph.context({ project: 'p' });
-  const before = JSON.stringify(graph.exportData());
+  graph.reviewContext({ project: 'p' });
+  const before = JSON.stringify(privilegedSnapshot(graph));
 
   const condition = objectOperatorCondition(graph);
   assert.ok(condition, 'the unevaluable condition is reported');
@@ -234,7 +235,7 @@ test('object-valued operator and unit from a lenient import are detached', () =>
   if (condition.observed && typeof condition.observed === 'object') condition.observed.observed.push(-1);
   if (condition.evidence) condition.evidence.value = { tampered: true };
 
-  assert.equal(JSON.stringify(graph.exportData()), before, 'no canonical state moved');
+  assert.equal(JSON.stringify(privilegedSnapshot(graph)), before, 'no canonical state moved');
   const again = objectOperatorCondition(graph);
   assert.deepEqual(again.operator, { name: ['gte'] }, 'a later response is unaffected');
   assert.deepEqual(again.unit, { name: ['ms'] });
@@ -246,26 +247,26 @@ test('a detached detail keeps a key whose value is undefined', () => {
     project: 'p', title: 't', chosen: 'c',
     alternatives: [{ label: 'alt', reasonRejected: 'r', reopenWhen: [{ key: 'absent', operator: 'gte', value: 1 }] }]
   });
-  const condition = graph.context({ project: 'p' }).conditionDiagnostics[0].conditions[0];
+  const condition = graph.reviewContext({ project: 'p' }).conditionDiagnostics[0].conditions[0];
   assert.ok('observed' in condition, 'the key survives detachment so "no evidence" stays reportable');
   assert.equal(condition.observed, undefined);
 });
 
 test('an object-valued attempt rule from a lenient import is detached', () => {
   const seed = createShadowGraph();
-  seed.addAttempt({
+  seed.importData({ records: [{ kind: 'attempt',
     project: 'p', id: 'attempt:t1', solution: 's', result: 'failed', resultClass: 'failed',
     reusableWhen: [{ key: 'lag', operator: 'gte', value: 500 }]
-  });
-  const snapshot = seed.exportData();
+   }] });
+  const snapshot = privilegedSnapshot(seed);
   snapshot.records[0].reusableWhen = [{ key: 'lag', operator: { name: ['gte'] }, unit: { name: ['ms'] }, value: [500] }];
   const graph = createShadowGraph();
   graph.importData(snapshot);
   graph.addFact({ project: 'p', key: 'lag', value: [600] });
-  graph.context({ project: 'p' });
-  const before = JSON.stringify(graph.exportData());
+  graph.reviewContext({ project: 'p' });
+  const before = JSON.stringify(privilegedSnapshot(graph));
 
-  const condition = graph.context({ project: 'p' }).conditionDiagnostics
+  const condition = graph.reviewContext({ project: 'p' }).conditionDiagnostics
     .filter((item) => item.attemptId).flatMap((item) => item.conditions)[0];
   assert.ok(condition, 'the attempt condition is reported');
   condition.operator.name.push('tampered');
@@ -273,22 +274,22 @@ test('an object-valued attempt rule from a lenient import is detached', () => {
   condition.expected.push(-1);
   condition.observed.push(-1);
 
-  assert.equal(JSON.stringify(graph.exportData()), before, 'no canonical state moved');
+  assert.equal(JSON.stringify(privilegedSnapshot(graph)), before, 'no canonical state moved');
 });
 
 test('a tampered detail leaves the journal and a rebuild untouched', async (t) => {
   const directory = await scratchDirectory(t, 'detach-rebuild-');
   const store = createJsonFileStore(join(directory, 'graph.json'));
   const graph = graphWithObjectRuleMetadata();
-  graph.context({ project: 'p' });
-  const journalBefore = JSON.stringify(graph.exportData().journal);
+  graph.reviewContext({ project: 'p' });
+  const journalBefore = JSON.stringify(privilegedSnapshot(graph).journal);
 
   const condition = objectOperatorCondition(graph);
   condition.operator.name.push('tampered');
   condition.unit.name.push('tampered');
 
-  assert.equal(JSON.stringify(graph.exportData().journal), journalBefore, 'the journal is unchanged');
-  await store.save(graph.exportData());
+  assert.equal(JSON.stringify(privilegedSnapshot(graph).journal), journalBefore, 'the journal is unchanged');
+  await store.save(privilegedSnapshot(graph));
   const restored = createShadowGraph();
   restored.importData(await store.load());
   const rebuilt = objectOperatorCondition(restored);
@@ -311,13 +312,13 @@ function acknowledgedTwoKeyGraph() {
   graph.addFact({ project: 'p', key: 'load', value: 60 });
   const review = openReview(graph);
   assert.equal(review.reason, 'lag, load', 'both keys are named');
-  graph.acknowledgeReview(review.reviewSignalId);
+  graph.acknowledgeReview(review.reviewSignalId, { project: 'p' });
   return graph;
 }
 
 // Reverse the alternatives, which reverses the order the reasons are built in.
 function reimportReversed(graph) {
-  const snapshot = graph.exportData();
+  const snapshot = privilegedSnapshot(graph);
   const decision = snapshot.records.find((item) => item.kind === 'decision');
   decision.alternatives = [...decision.alternatives].reverse();
   const reopened = createShadowGraph();
@@ -330,23 +331,23 @@ test('reordering rules on different keys does not reopen an acknowledged review'
   const review = openReview(reordered);
   assert.equal(review.reason, 'load, lag', 'the reason follows the stored order and is not rewritten');
   assert.equal(review.reviewSignalStatus, 'acknowledged', 'but identity does not depend on that order');
-  assert.equal(reordered.getReviewSignals({ project: 'p', status: 'open' }).length, 0, 'no duplicate signal appears');
+  assert.equal(reordered.getReviewSignals({ project: 'p', status: 'open' }).items.length, 0, 'no duplicate signal appears');
 });
 
 test('reordering rules on the same key does not reopen an acknowledged review', () => {
   const graph = seedGraph({ rules: [LAG_LOW, LAG_HIGH] });
   graph.addFact({ project: 'p', key: 'lag', value: 1200 });
-  graph.acknowledgeReview(openReview(graph).reviewSignalId);
+  graph.acknowledgeReview(openReview(graph).reviewSignalId, { project: 'p' });
 
   const reordered = reimportReversed(graph);
   assert.equal(openReview(reordered).reviewSignalStatus, 'acknowledged');
-  assert.equal(reordered.getReviewSignals({ project: 'p', status: 'open' }).length, 0);
+  assert.equal(reordered.getReviewSignals({ project: 'p', status: 'open' }).items.length, 0);
 });
 
 test('a genuinely changed breach set still opens a new signal after a reorder', () => {
   const graph = seedGraph({ rules: [LAG_LOW, LAG_HIGH] });
   graph.addFact({ project: 'p', key: 'lag', value: 600 });
-  graph.acknowledgeReview(openReview(graph).reviewSignalId);
+  graph.acknowledgeReview(openReview(graph).reviewSignalId, { project: 'p' });
 
   const reordered = reimportReversed(graph);
   assert.equal(openReview(reordered).reviewSignalStatus, 'acknowledged', 'the same coverage stays acknowledged');
@@ -356,7 +357,7 @@ test('a genuinely changed breach set still opens a new signal after a reorder', 
 
 test('reorder stability holds across a restart on JSON and SQLite', async (t) => {
   const directory = await scratchDirectory(t, 'reorder-parity-');
-  const snapshot = reimportReversed(acknowledgedTwoKeyGraph()).exportData();
+  const snapshot = privilegedSnapshot(reimportReversed(acknowledgedTwoKeyGraph()));
   const results = {};
 
   for (const backend of ['json', 'sqlite']) {
@@ -372,7 +373,7 @@ test('reorder stability holds across a restart on JSON and SQLite', async (t) =>
 
       const graph = createShadowGraph();
       graph.importData(durable);
-      results[backend] = [openReview(graph).reviewSignalStatus, graph.getReviewSignals({ project: 'p', status: 'open' }).length];
+      results[backend] = [openReview(graph).reviewSignalStatus, graph.getReviewSignals({ project: 'p', status: 'open' }).items.length];
     });
   }
 

@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { createShadowGraph } from '../src/shadowgraph.js';
 import { createJsonFileStore } from '../src/storage.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
+import { privilegedSnapshot } from '../src/internal/snapshot.js';
 
 // A decision whose rejected alternative reopens on a machine-checkable threshold.
 function decisionWithThreshold(graph, rule, project = 'p') {
@@ -25,8 +26,8 @@ test('a condition with no recorded evidence is visible as unresolved, not a sile
   const decision = decisionWithThreshold(graph, { key: 'replicaLagMs', operator: 'greater_than', value: 500 });
 
   const view = graph.context({ project: 'p' });
-  assert.equal(view.openReviews.length, 0, 'no evidence is not a breach');
-  assert.equal(graph.getReviewSignals({ project: 'p' }).length, 0, 'and raises no review signal');
+  assert.equal(view.firedConditions.length, 0, 'no evidence is not a breach');
+  assert.equal(graph.getReviewSignals({ project: 'p' }).items.length, 0, 'and raises no review signal');
 
   const conditions = conditionsFor(graph, decision.id);
   assert.equal(conditions.length, 1, 'but the uncertainty is reported');
@@ -41,7 +42,7 @@ test('an unreadable observation is unresolved rather than a confident no-review'
   // Number('900ms') is NaN, and NaN > 500 is false. Before, this read as "fine".
   graph.addFact({ project: 'p', key: 'replicaLagMs', value: '900ms', sourceClass: 'measured' });
 
-  assert.equal(graph.context({ project: 'p' }).openReviews.length, 0);
+  assert.equal(graph.context({ project: 'p' }).firedConditions.length, 0);
   const conditions = conditionsFor(graph, decision.id);
   assert.equal(conditions.length, 1);
   assert.equal(conditions[0].verdict, 'unknown');
@@ -56,10 +57,10 @@ test('a declared unit makes the same observation decidable and reports the breac
   const fact = graph.addFact({ project: 'p', key: 'replicaLagMs', value: '900ms', sourceClass: 'measured' });
 
   const view = graph.context({ project: 'p' });
-  assert.equal(view.openReviews.length, 1);
-  const [open] = view.openReviews;
+  assert.equal(view.firedConditions.length, 1);
+  const [open] = view.firedConditions;
   assert.equal(open.decisionId, decision.id);
-  assert.deepEqual(open.alternativesToReconsider, ['primary-only']);
+  assert.deepEqual(open.affectedAlternatives, ['primary-only']);
 
   assert.equal(open.violatedConditions.length, 1);
   const violated = open.violatedConditions[0];
@@ -80,7 +81,7 @@ test('an irrelevant change stays negative and raises nothing', () => {
   graph.addFact({ project: 'p', key: 'officeWifiSsid', value: 'guest', sourceClass: 'human' });
 
   const view = graph.context({ project: 'p' });
-  assert.equal(view.openReviews.length, 0);
+  assert.equal(view.firedConditions.length, 0);
   assert.equal(conditionsFor(graph, decision.id).length, 0, 'a settled false needs no diagnostic');
 });
 
@@ -90,9 +91,9 @@ test('a pass resting on facts that disagree is reported as contested', () => {
   graph.addFact({ project: 'p', key: 'replicaLagMs', value: '20ms', sourceClass: 'measured', validFrom: '2026-03-01T00:00:00Z' });
 
   // A second, equally applicable observation of the same key that disagrees.
-  const snapshot = graph.exportData();
+  const snapshot = privilegedSnapshot(graph);
   const original = snapshot.facts[0];
-  snapshot.facts = [...snapshot.facts, { ...original, id: 'fact:contested', value: '900ms' }];
+  snapshot.facts = [...snapshot.facts, { ...original, id: 'fact:contested', value: '900ms', erasureToken: 'tok_contested' }];
   const contested = createShadowGraph();
   contested.importData(snapshot);
 
@@ -147,20 +148,20 @@ test('an acknowledged breach stays acknowledged, but a new distinct breach is no
   });
   graph.addFact({ project: 'p', key: 'replicaLagMs', value: '900ms', sourceClass: 'measured' });
 
-  graph.review({ project: 'p' });
-  const [first] = graph.getReviewSignals({ project: 'p', status: 'open' });
+  graph.review({ project: 'p' }).items;
+  const [first] = graph.getReviewSignals({ project: 'p', status: 'open' }).items;
   assert.ok(first, 'the first breach raised a signal');
-  graph.acknowledgeReview(first.id);
+  graph.acknowledgeReview(first.id, { project: 'p' });
 
   // Re-evaluating unchanged evidence must not resurrect the acknowledged signal.
-  graph.review({ project: 'p' });
-  assert.equal(graph.getReviewSignals({ project: 'p', status: 'open' }).length, 0, 'unchanged evidence stays acknowledged');
+  graph.review({ project: 'p' }).items;
+  assert.equal(graph.getReviewSignals({ project: 'p', status: 'open' }).items.length, 0, 'unchanged evidence stays acknowledged');
 
   // A genuinely new applicable breach is a different reason, so it is not
   // permanently suppressed by the earlier acknowledgement.
   graph.addFact({ project: 'p', key: 'region', value: 'eu-west', sourceClass: 'human' });
-  graph.review({ project: 'p' });
-  const open = graph.getReviewSignals({ project: 'p', status: 'open' });
+  graph.review({ project: 'p' }).items;
+  const open = graph.getReviewSignals({ project: 'p', status: 'open' }).items;
   assert.equal(open.length, 1, 'the new breach raises its own signal');
   assert.match(open[0].reason, /region/);
 });
@@ -177,13 +178,13 @@ test('a caller write rejects an unusable operator or unit instead of storing a c
 test('a stored rule whose operator this build did not recognise is preserved, not rewritten', () => {
   const seeded = createShadowGraph();
   const decision = decisionWithThreshold(seeded, { key: 'replicaLagMs', operator: 'greater_than', value: 500 });
-  const snapshot = seeded.exportData();
+  const snapshot = privilegedSnapshot(seeded);
   // Simulate a record written by a build with an operator vocabulary we do not share.
   snapshot.records[0].alternatives[0].reopenWhen = [{ key: 'replicaLagMs', operator: 'within_stddev', value: 2 }];
 
   const graph = createShadowGraph();
   graph.importData(snapshot);
-  const stored = graph.exportData().records[0].alternatives[0].reopenWhen[0];
+  const stored = privilegedSnapshot(graph).records[0].alternatives[0].reopenWhen[0];
   assert.equal(stored.operator, 'within_stddev', 'the original rule survives import verbatim');
 
   graph.addFact({ project: 'p', key: 'replicaLagMs', value: 3, sourceClass: 'measured' });
@@ -201,14 +202,14 @@ test('a declared unit survives persistence and restart', async (t) => {
   const graph = createShadowGraph();
   decisionWithThreshold(graph, { key: 'replicaLagMs', operator: 'greater_than', value: 500, unit: 'ms' });
   graph.addFact({ project: 'p', key: 'replicaLagMs', value: '900ms', sourceClass: 'measured' });
-  await store.save(graph.exportData());
+  await store.save(privilegedSnapshot(graph));
 
   const reopened = createShadowGraph();
   reopened.importData(await store.load());
-  const rule = reopened.exportData().records[0].alternatives[0].reopenWhen[0];
+  const rule = privilegedSnapshot(reopened).records[0].alternatives[0].reopenWhen[0];
   assert.equal(rule.unit, 'ms', 'the unit was not dropped on the way to storage');
 
   const view = reopened.context({ project: 'p' });
-  assert.equal(view.openReviews.length, 1, 'and the condition still evaluates after restart');
-  assert.equal(view.openReviews[0].violatedConditions[0].unit, 'ms');
+  assert.equal(view.firedConditions.length, 1, 'and the condition still evaluates after restart');
+  assert.equal(view.firedConditions[0].violatedConditions[0].unit, 'ms');
 });

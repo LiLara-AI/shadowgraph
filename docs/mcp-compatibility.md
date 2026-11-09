@@ -1,6 +1,6 @@
 # ShadowGraph — MCP Compatibility Status
 
-**Last verified:** 2026-09-03 against official MCP specification/schema sources, `@modelcontextprotocol/inspector@2.4.0`, and the pinned `mcp-proxy@6.4.3` that fronts Glama’s generated container.
+**Last verified:** 2026-09-03 against official MCP specification/schema sources, `@modelcontextprotocol/inspector@2.4.0`, and the pinned `mcp-proxy@6.4.3` used by that historical local compatibility gate. On 2026-10-08 the Inspector gate client moved to `@modelcontextprotocol/inspector@2.9.0` (it brings `@modelcontextprotocol/client` 2.2.0, the fix for GHSA-6qxp-vccf-f47h, and drops `@modelcontextprotocol/sdk` from the gate tooling); the same strict gate below passed unchanged with it. On 2026-10-30 it moved to `@modelcontextprotocol/inspector@2.11.0` (it brings `@modelcontextprotocol/client` and `@modelcontextprotocol/server` 2.3.1, the fixes for GHSA-6prh-2h8m-c8cw, GHSA-jm63-cq47-j5jp, GHSA-46jr-4wx8-v453 and GHSA-rvq5-wwqv-78pq); the same strict gate passed unchanged again. The specification sources were not rechecked then.
 **Implemented revisions:** handshake `2024-11-05`, `2025-03-26`, `2025-06-18`, and `2025-11-25`, negotiated by `initialize`; modern `2026-07-28` through per-request `_meta` (dual-era stdio server).
 
 ## 1. Honest compatibility statement
@@ -10,6 +10,12 @@ ShadowGraph implements both eras in the current specification's terms:
 - **Handshake:** `initialize` negotiates one of `2025-11-25`, `2025-06-18`, `2025-03-26`, or `2024-11-05`. The requested revision is echoed when this server implements it, and any other value is answered with `2025-11-25`, the latest revision it implements. `protocolVersion` is required: a missing, non-string, or empty value is `-32602`, not a revision to guess from. Everything the session receives afterwards follows the revision the server returned (§4).
 - **Modern:** requests carrying the required `io.modelcontextprotocol/*` `_meta` fields use stateless `2026-07-28` semantics. `server/discover` is implemented and advertises every revision this server implements, newest first.
 - An unsupported modern per-request version returns `-32022` with exact `supported` and `requested` data. `supported` lists every implemented revision; only `2026-07-28` is usable per request, because the others are negotiated through `initialize`.
+
+Starting with v0.43.3, every supported handshake response includes the same
+optional `instructions` guidance as modern `server/discover`. Earlier handshake
+responses omitted it. These instructions explain tool selection, actual writes,
+signal-ID mapping and profile boundaries; they do not grant permissions or add
+tools. The optional field exists in the supported handshake specifications.
 
 An `initialize` request selects handshake semantics; it never causes the server to falsely echo a revision it does not implement, `2026-07-28` included. Modern clients select modern semantics with per-request metadata.
 
@@ -32,7 +38,7 @@ Modern complete results include `resultType: 'complete'` and server identity met
 
 ### Safe caller error details
 
-Phase 1 caller-corrective failures use the public message `Tool execution failed (<issueCode>)` and a constructed details object `{ issueCode, fieldPath, retryable: false }`. Legacy responses place that object in JSON-RPC `error.data`; modern `CallToolResult` responses place the same object in `result._meta['shadowgraph/error']`. Existing tagged missing-field details and other allowlisted domain/recovery data are preserved in those same locations.
+Phase 1 caller-corrective failures use the public message `Tool execution failed (<issueCode>)` and constructed details `{ issueCode, fieldPath, retryable: false }`. Legacy responses place that object in JSON-RPC `error.data`; modern `CallToolResult` responses place it in `result._meta['shadowgraph/error']`. Tagged missing-field details and allowlisted domain/recovery data use the same locations.
 
 | Failure case | `issueCode` | `fieldPath` |
 | --- | --- | --- |
@@ -42,17 +48,211 @@ Phase 1 caller-corrective failures use the public message `Tool execution failed
 | Illegal decision transition | `illegal_transition` | `status` |
 | Missing required field | `missing_required_field` | the required field, including `resultClass` |
 
-These five Phase 1 mappings therefore emit four distinct caller-error codes; `invalid_field` covers both invalid-value cases. Raw error messages, supplied values, filesystem paths, stacks, and internal diagnostic keys are not copied into the public response. `idempotency_conflict` arrives with Phase 2 and is not yet emitted.
+These five Phase 1 mappings emit four caller-error codes because `invalid_field` covers both invalid-value cases. Raw error messages, supplied values, filesystem paths, stacks, and internal diagnostic keys are not copied into these responses. `idempotency_conflict` arrives with Phase 2 and is not yet emitted.
 
 ## 3. Tool modes and verifier boundary
 
-| Mode | Verifier | Advertised tools |
-| --- | --- | ---: |
-| Full | not configured | 28 |
-| Full | configured | 29 (`shadowgraph_verify_fact` is added) |
-| Compact | either | 16 |
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Host as MCP Client (Host / Agent)
+    participant Proxy as Glama MCP Proxy / Gateway
+    participant Server as ShadowGraph MCP Server
+    participant Catalog as MCP Tool Catalog
+
+    rect rgb(240, 248, 255)
+    Note over Host,Catalog: Phase 1: Protocol Negotiation & Handshake
+    Host->>Proxy: JSON-RPC initialize { protocolVersion: "2025-11-25", ... }
+    Proxy->>Server: Forward initialize request
+    Server->>Server: negotiateLegacyProtocolVersion("2025-11-25")
+    Server-->>Proxy: initialize response { protocolVersion: "2025-11-25", instructions, serverInfo }
+    Proxy-->>Host: Handshake established
+    Host->>Server: notifications/initialized
+    end
+
+    rect rgb(245, 255, 245)
+    Note over Host,Catalog: Phase 2: Profile Selection & Tool Inventory Listing
+    Host->>Server: tools/list { _meta: { ... } }
+    alt SHADOWGRAPH_MCP_COMPACT=1
+        Server->>Catalog: selectTools(catalog, { compact: true })
+        Catalog-->>Server: 16 Compact Tools
+    else SHADOWGRAPH_MCP_PROFILE=workflow
+        Server->>Catalog: selectTools(catalog, { profile: "workflow" })
+        Catalog-->>Server: 20 Workflow Tools
+    else Default / SHADOWGRAPH_MCP_COMPACT=0
+        Server->>Catalog: selectTools(catalog)
+        Catalog-->>Server: 35 Full Tools (36 with verifier)
+    end
+    Server-->>Host: tools/list response { tools: [...] }
+    end
+
+    rect rgb(255, 250, 240)
+    Note over Host,Catalog: Phase 3: Tool Execution & Profile Boundary Enforcement
+    Host->>Server: tools/call { name: "shadowgraph_link", arguments: { ... } }
+    alt Tool in Active Profile
+        Server->>Server: Execute handler & sanitize output
+        Server-->>Host: { content: [...], structuredContent: { ... } }
+    else Tool Excluded from Active Profile (Compact/Workflow)
+        Server-->>Host: RPC error -32601 with active profile guidance
+    end
+    end
+```
+
+| Mode | Verifier | Advertised tools | Environment Trigger |
+| --- | --- | ---: | --- |
+| Full | not configured | 35 | Default (unset or `SHADOWGRAPH_MCP_COMPACT=0`) |
+| Full | configured | 36 | Verifier endpoint configured |
+| Compact | either | 16 | `SHADOWGRAPH_MCP_COMPACT=1` |
+| Workflow (explicit opt-in) | either | 20 | `SHADOWGRAPH_MCP_PROFILE=workflow` |
+
+### Complete Tool Inventory Availability Matrix
+
+| Tool Name | Compact (16) | Workflow (20) | Full (35/36) | Category | Mutating / Destructive |
+|---|:---:|:---:|:---:|---|:---:|
+| `shadowgraph_record_decision` | ✅ | ✅ | ✅ | Decision | Writes revision |
+| `shadowgraph_record_attempt` | ✅ | ✅ | ✅ | Decision | Writes revision |
+| `shadowgraph_record_outcome` | ✅ | ✅ | ✅ | Lifecycle | Overwrites / transitions |
+| `shadowgraph_remember` | ✅ | ✅ | ✅ | Memory | Overwrites / appends |
+| `shadowgraph_recall` | ✅ | ✅ | ✅ | Memory | Read (conditional audit) |
+| `shadowgraph_record_fact` | ✅ | ✅ | ✅ | Knowledge | Overwrites / appends |
+| `shadowgraph_search` | ✅ | ✅ | ✅ | Search | Read-only |
+| `shadowgraph_retrieve` | ✅ | ✅ | ✅ | Search | Read (conditional audit) |
+| `shadowgraph_context` | ✅ | ✅ | ✅ | Context | Read-only fast path |
+| `shadowgraph_review_context` | ✅ | ✅ | ✅ | Review | Evaluates & persists |
+| `shadowgraph_expand` | ✅ | ✅ | ✅ | Context | Read-only |
+| `shadowgraph_review` | ✅ | ✅ | ✅ | Review | Evaluates & persists |
+| `shadowgraph_reconsider` | ✅ | ✅ | ✅ | Review | Evaluates & persists |
+| `shadowgraph_ack_review` | ✅ | ✅ | ✅ | Review | Overwrites signal state |
+| `shadowgraph_maintain` | ✅ | ✅ | ✅ | Maintenance | Prunes expired / stale |
+| `shadowgraph_validate` | ✅ | ✅ | ✅ | Integrity | Read (conditional audit) |
+| `shadowgraph_supersede` | ❌ | ✅ | ✅ | Decision | Overwrites / links |
+| `shadowgraph_update_status` | ❌ | ✅ | ✅ | Lifecycle | Overwrites decision status |
+| `shadowgraph_confidence_evidence` | ❌ | ✅ | ✅ | Decision | Writes evidence revision |
+| `shadowgraph_review_signals` | ❌ | ✅ | ✅ | Review | Read (conditional audit) |
+| `shadowgraph_link` | ❌ | ❌ | ✅ | Graph | Overwrites graph edges |
+| `shadowgraph_traverse` | ❌ | ❌ | ✅ | Graph | Read (conditional audit) |
+| `shadowgraph_redact` | ❌ | ❌ | ✅ | Security | Read (conditional audit) |
+| `shadowgraph_purge` | ❌ | ❌ | ✅ | Storage | Irreversible deletion |
+| `shadowgraph_purge_preview` | ❌ | ❌ | ✅ | Storage | Read-only preview |
+| `shadowgraph_backup` | ❌ | ❌ | ✅ | Storage | Overwrites backup target |
+| `shadowgraph_restore` | ❌ | ❌ | ✅ | Storage | Overwrites store data |
+| `shadowgraph_journal` | ❌ | ❌ | ✅ | Storage | Read (conditional audit) |
+| `shadowgraph_rebuild` | ❌ | ❌ | ✅ | Storage | Read (conditional audit) |
+| `shadowgraph_repair_plan` | ❌ | ❌ | ✅ | Maintenance | Read (conditional audit) |
+| `shadowgraph_request_wider_access` | ❌ | ❌ | ✅ | Governance | Writes access request |
+| `shadowgraph_revoke_grant` | ❌ | ❌ | ✅ | Governance | Writes grant revocation |
+| `shadowgraph_discard_access` | ❌ | ❌ | ✅ | Governance | Writes access discard |
+| `shadowgraph_bind` | ❌ | ❌ | ✅ | Governance | Proposes project bind |
+| `shadowgraph_attribute` | ❌ | ❌ | ✅ | Governance | Proposes attribution |
+| `shadowgraph_verify_fact` | ❌ | ❌ | Optional | Verification | Writes fact verification |
 
 `SHADOWGRAPH_MCP_COMPACT=1` must be passed to the server process, not merely assumed from the Inspector launch shell. The automated gate uses Inspector's server environment option and verifies the returned list count.
+
+Compact mode keeps the recording, recall, context/expansion, review/acknowledgement and
+maintenance workflow. Decision status changes, decision supersession, keyed confidence evidence,
+and stored-signal inspection also exist in the opt-in workflow profile below. Graph traversal and repair/recovery remain full-mode operations.
+Their implementations and stored data are not removed. Descriptions qualify full-only references,
+including references inside parameter and output schemas.
+
+To use those operations, the operator changes the MCP server's environment to
+`SHADOWGRAPH_MCP_COMPACT=0` (or removes the variable), leaves `SHADOWGRAPH_MCP_PROFILE` unset, then restarts/reconnects the server and
+refreshes `tools/list`. This also exposes the full administrative surface, including purge and
+restore; choose it deliberately. There is no agent-callable mode-switch tool. The `compact`
+argument of `shadowgraph_context` changes record presentation only, never tool availability.
+
+### Optional workflow profile: complete the decision loop
+
+Available starting with v0.42.3 Technical Preview. This is an additive, opt-in
+advertisement profile; existing Full and Compact clients keep their inventories.
+
+The default remains full (35 tools, or 36 with a verifier); compact remains 16.
+For ordinary decision work without the full administrative inventory, an operator
+can explicitly set `SHADOWGRAPH_MCP_PROFILE=workflow` with `SHADOWGRAPH_MCP_COMPACT`
+unset or `0`, then restart/reconnect and refresh `tools/list`. The profile has 20
+tools: all 16 compact tools plus these four **existing** handlers:
+
+| Added capability | Tool | Effect and boundary |
+| --- | --- | --- |
+| Inspect previously saved review work without reevaluation | `shadowgraph_review_signals` | Scoped read; an access key still persists its bounded audit |
+| Record new evidence short of a completed outcome | `shadowgraph_confidence_evidence` | Keyed contribution to an owned decision; retry does not double-count, but saves a revision |
+| Move a decision through its legal lifecycle | `shadowgraph_update_status` | Owned decision only; rejects caller-assigned stale/superseded states |
+| Correct a decision by explicit replacement | `shadowgraph_supersede` | Existing same-owner replacement required; retains both decisions and records their relation |
+
+Example: record a decision and its reopen conditions; evaluate with `review` or
+`reconsider`; inspect its evidence; record a replacement with `record_decision`;
+call `supersede` with the old and new returned IDs; then `ack_review` with the
+returned **signal** ID. For unchanged choices, `update_status` can make a legal
+lifecycle transition. Acknowledgement alone never changes a decision. After a
+restart, `review_signals` can recover open work without creating new signals.
+
+This addresses the compact workflow gap; it does not alter compact clients or
+silently advertise more tools to them. The profile reuses the same names, schemas,
+annotations, handlers, scope checks, grant audits and persistence paths as full mode.
+Grants never authorize the added writes. No permission is issued by selecting a
+profile. Purge, backup, restoration, repair/rebuild, graph mutation/traversal,
+owner binding and access-management tools are not added. These are deliberately
+separate operations, not steps the profile promises to complete.
+
+An unknown profile or `workflow` together with `SHADOWGRAPH_MCP_COMPACT=1` fails
+startup, rather than guessing which inventory was intended. There is no tool that
+changes the mode. To return to full, unset `SHADOWGRAPH_MCP_PROFILE` and restart
+with compact unset or `0`; to return to compact, unset the profile and set compact
+`1`. The context argument `compact:true` only shortens returned record presentation.
+
+### Rule inputs and review effects
+
+For an alternative with `reopenWhen:[{key:"ready",value:true}]`, a call with
+`facts:{ready:true}` evaluates a temporary override; other keys still use stored
+facts. It does not record a fact. A string rule `reopenWhen:["budget"]` instead
+matches `changedFacts:["budget"]`; supplying a value alone does not fire that rule.
+Both inputs may be supplied when a decision has both types of rules.
+
+`review` returns due items; `reconsider` also explains grounded negatives and
+unresolved evidence. `review_recommended` identifies a trigger, not a winning
+alternative. `manual_review` means unresolved or contested evidence. Only complete
+evaluation can produce `unchanged`; none of these verdicts changes confidence,
+choice or lifecycle. A specific `decisionId` still needs a resolved project/origin;
+unknown, foreign or closed decisions are rejected rather than reported unchanged.
+Use `context` for evaluation without persisted signals, and `review_context` for
+persisted signals alongside working context. Own-scope context saves no immediate
+revision; fallback diagnostics can be flushed by a later save. Access-key reads
+have their separately disclosed audit writes.
+
+### Choosing a read or review operation
+
+| Need | Tool and meaningful effect |
+| --- | --- |
+| Prepare for a task with current decisions, failed attempts and fired conditions | `shadowgraph_context`; evaluates without persisting signals |
+| Find records containing every query term | `shadowgraph_search`; no graph expansion |
+| Include related records from content matches by following graph links in order | `shadowgraph_retrieve`; neighbours stay within the read scope |
+| Rank memory using available lexical, vector, graph and temporal signals | `shadowgraph_recall`; unavailable signals are disclosed, not fabricated |
+| Inspect a shortened context line in full | `shadowgraph_expand`; copy its expansion handle into the input as described below |
+| Evaluate and persist due review signals | `shadowgraph_review`; returns due decisions |
+| Evaluate and persist signals alongside the working set | `shadowgraph_review_context`; also returns context collections |
+| Explain triggered, grounded or unresolved conditions | `shadowgraph_reconsider`; persists own-scope signals, not a lifecycle transition |
+| Mark overdue owned decisions stale and facts expired | `shadowgraph_maintain`; time-dependent lifecycle writes, then rule evaluation |
+| Inspect integrity without repairing | `shadowgraph_validate` |
+
+These reads use the explicit project or confirmed workspace binding, otherwise the capture origin.
+No resolved identity yields an empty scoped result. An access key can widen reads within a current
+grant, but cannot widen writes. Grant-bearing reads commit a revision and bounded operational audit;
+they are not unconditionally read-only. Ordinary own-scope lookup reads do not save. Context fallback
+miss diagnostics remain in memory until a later save. `review`, `review_context` and `reconsider`
+deduplicate own-scope signals but still commit a revision on repeat calls.
+
+For a compact review loop, call `shadowgraph_review` or `shadowgraph_review_context`, then pass its
+`reviewSignalId` (or `id`), with the same project/origin, to `shadowgraph_ack_review` (which accepts `id` or `reviewSignalId`). A context-only evaluation
+can report `reviewSignalStatus: unpersisted`; persist the evaluation before acknowledging it.
+Acknowledgement closes that signal, not the decision, and a new breach remains visible.
+
+For record expansion, obtain `relevant.items[].line.expansion` from
+`shadowgraph_context` with `query` or `focalId` and `compact:true`. Copy its `recordId`, `digest`,
+`asOf`, `derivedAt` and `derivationVersion` into the expansion input, omitting null optional values.
+Copy `scope.project`, `scope.originId` and `scope.grantId` to top-level fields, also omitting nulls;
+do not pass `operation` or a nested `scope`. Keep the original bounds. A changed record returns its
+current version with `revision_changed`; an out-of-scope record returns `unavailable`. Inspect
+completeness and fallback fields: a full record may be returned when a shortened line would lose
+decisive meaning.
 
 ### Tool inventory
 
@@ -60,30 +260,32 @@ The **16 compact tools** are the everyday agent workflow. They are also present 
 
 | Tool | Purpose |
 | --- | --- |
-| `shadowgraph_context` | Load the working set for a project before a consequential task |
+| `shadowgraph_context` | Read the working set before a task; no canonical or signal writes; access keys persist bounded audit |
+| `shadowgraph_review_context` | The same working set, evaluated and persisted: raises the review signals it finds due |
+| `shadowgraph_expand` | Expand a claim line from `shadowgraph_context` to the full record it was derived from, checked against that revision, or an explicit limitation |
 | `shadowgraph_remember` | Store scoped memory (`preference`, `profile`, `goal`, `instruction`, `procedure`, `episode`, `note`) |
 | `shadowgraph_recall` | Hybrid lexical/vector/graph/temporal recall of scoped memory |
 | `shadowgraph_record_decision` | Record a decision with assumptions, evidence, and rejected alternatives |
 | `shadowgraph_record_attempt` | Record an attempt and its lesson |
 | `shadowgraph_record_fact` | Record an observed fact with a `sourceClass` provenance claim |
 | `shadowgraph_record_outcome` | Record `successful` / `mixed` / `failed` / `unknown` and update confidence |
-| `shadowgraph_update_status` | Move a decision through the documented lifecycle states |
-| `shadowgraph_supersede` | Replace a decision, persisting a `supersedes` relation |
 | `shadowgraph_retrieve` | Bounded retrieval with declared completeness |
 | `shadowgraph_search` | Content search across decisions, attempts, and facts |
 | `shadowgraph_review` | Evaluate reopen rules against stored facts and persist review signals |
 | `shadowgraph_reconsider` | The same evaluation, read as a verdict: `review_recommended`, `unchanged`, or `manual_review`, with the conditions behind each |
-| `shadowgraph_ack_review` | Acknowledge one review signal as seen, without resolving the decision |
+| `shadowgraph_ack_review` | Acknowledge one review signal |
 | `shadowgraph_validate` | Report graph diagnostics by severity |
 | `shadowgraph_maintain` | Stale decisions past `reviewAfter`, expire facts, then review |
 
-**Full mode adds these 12**, for 28 total:
+**Full mode adds these 19**, for 35 total:
 
 | Tool | Purpose |
 | --- | --- |
+| `shadowgraph_update_status` | Move a decision through the documented lifecycle states |
 | `shadowgraph_link` | Create an explainable relationship between two entities |
 | `shadowgraph_traverse` | Walk relationships from an entity by depth and direction |
-| `shadowgraph_redact` | Produce a privacy-safe export; never mutates |
+| `shadowgraph_supersede` | Replace a decision, persisting a `supersedes` relation |
+| `shadowgraph_redact` | Produce a privacy-safe export; grant-bearing calls persist bounded audit |
 | `shadowgraph_purge` | Logical (default) or explicit irreversible hard project purge |
 | `shadowgraph_purge_preview` | Show deletion counts without changing storage |
 | `shadowgraph_review_signals` | Read persisted review signals |
@@ -93,15 +295,25 @@ The **16 compact tools** are the everyday agent workflow. They are also present 
 | `shadowgraph_backup` | Write a consistent snapshot to a destination path |
 | `shadowgraph_restore` | Restore a validated JSON or SQLite backup |
 | `shadowgraph_confidence_evidence` | Apply one keyed confidence contribution |
+| `shadowgraph_request_wider_access` | Propose explicit scope, surfaces and expiry; confers no authority |
+| `shadowgraph_revoke_grant` | Revoke authority and derived grants |
+| `shadowgraph_discard_access` | Retain terminal authority and a discard tombstone |
+| `shadowgraph_bind` | Propose a worktree or shared-repository mapping, project and reason; writes nothing, and the owner applies it with `shadowgraph bind` at a terminal |
+| `shadowgraph_attribute` | Propose reattributing explicit IDs or an exact origin to a named project with a reason; moves and looks up nothing, and the owner applies it with `shadowgraph attribute` at a terminal |
 
-A 29th tool, `shadowgraph_verify_fact`, appears in full mode **only** when
+A 36th tool, `shadowgraph_verify_fact`, appears in full mode **only** when
 `SHADOWGRAPH_VERIFIER_CONFIG` names a local trust configuration. The caller supplies just `factId`
 and an evidence path inside the configured root — never verifier identity, key, signature, method,
 or target status. Compact mode stays at exactly 16 regardless.
 
+PR12 read tools accept `accessId` or `grantId`; they recheck current authority and
+commit bounded audit before delivery. Neither MCP nor HTTP exposes issuance.
+See [the access transport contract](contracts/access-transports.md) for the owner
+CLI, binding, expansion provenance, effect declarations and measured wire costs.
+
 Compact mode is a tool-advertisement choice, not lossy storage: the full relational graph,
 memories, facts, alternatives, and outcomes are stored identically in both modes. Every tool listed
-above declares an output schema except `shadowgraph_review` and `shadowgraph_review_signals`; §4
+above declares an output schema, including `shadowgraph_review` and `shadowgraph_review_signals`; §4
 explains why.
 
 Alongside tools, the server advertises exactly one resource, `shadowgraph://context`, and one
@@ -154,10 +366,11 @@ agrees nothing. Every reply in a batch is held until the last member finishes, s
 costs memory in proportion to its results.
 
 **Compatibility guarantee.** For a session negotiated at `2024-11-05`, the top-level member set of
-every tool object (`name`, `description`, `inputSchema`), the tool names and the 28/14/29 counts, and
-the serialized text result (`content[0].text`, the tool's return value as
-`JSON.stringify(value, null, 2)`) are the same as before this metadata existed, and that text block
-is identical in every tier: `structuredContent` is an addition beside it, never a replacement. Tool
+every tool object remains (`name`, `description`, `inputSchema`). Tool names and
+the current 35/16/36 counts are identical across protocol tiers. The serialized
+text result (`content[0].text`, the tool's return value as
+`JSON.stringify(value, null, 2)`) is identical in every tier: `structuredContent`
+is an addition beside it, never a replacement. Tool
 objects are **not** byte-identical to earlier releases. Descriptions were rewritten, every
 input-schema property gained a description, `shadowgraph_traverse` now documents `project` and
 `scope`, and `shadowgraph_maintain` declares that `changedFacts` holds strings. Those are additions
@@ -172,62 +385,74 @@ unknown-tool guard, and the set of tools whose successful call is followed by a 
 
 Annotations are hints, and every one here is derived from what the handler actually does to the
 server's environment. `readOnlyHint` means a call leaves the durable store byte-identical and writes
-no file. `destructiveHint` means a call can remove stored state, overwrite an existing record without
-leaving the previous value in the journal, or replace a file outside the store; transitions that keep
-history (status changes, supersession, fact supersession, memory invalidation) are additive and are
-not destructive. `idempotentHint` means a repeated identical call has no further effect on that
+no file. `destructiveHint=false` means only additive updates. Replacing existing current state is
+potentially destructive even when the journal retains history; status changes, supersession,
+confidence changes and fact/memory replacement therefore advertise true. The warning is risk
+vocabulary, not evidence that a build failed or the tool is malicious. Acknowledgement changes
+`status` and restamps `acknowledgedAt` without a journal entry; its true hint is retained. See the
+[official MCP annotation semantics](https://modelcontextprotocol.io/specification/2025-11-25/schema#toolannotations). `idempotentHint` means a repeated identical call has no further effect on that
 environment — which includes the durable revision, not only the domain result. `openWorldHint` means
 the tool reads or writes a caller-selected path outside the store.
 
 `test/mcp-tool-effects.test.js` drives the running server, calls every tool twice with identical
 arguments, records the durable revision, the journal, the stored entities, the timestamps, and the
 files written, and derives all four hints from those observations. Every row below is what that test
-proves, not a description maintained beside the code, with one exception: it runs with no embedding
+proves, not a description maintained beside the code. Replacement cases preseed existing fact/memory keys; history does not exempt an overwrite. One exception: it runs with no embedding
 endpoint configured, so the two "only with an embedder" cells are covered by the catalog tests in
 `test/mcp-tool-metadata.test.js` instead, which build the catalog both ways.
 
 | Tool | readOnly | destructive | idempotent | openWorld |
 | --- | :---: | :---: | :---: | :---: |
-| `shadowgraph_search` | yes | no | yes | no |
-| `shadowgraph_retrieve` | yes | no | yes | no |
-| `shadowgraph_recall` | yes | no | yes | only with an embedder |
-| `shadowgraph_traverse` | yes | no | yes | no |
-| `shadowgraph_validate` | yes | no | yes | no |
-| `shadowgraph_journal` | yes | no | yes | no |
-| `shadowgraph_rebuild` | yes | no | yes | no |
-| `shadowgraph_review_signals` | yes | no | yes | no |
+| `shadowgraph_search` | no | no | no | no |
+| `shadowgraph_retrieve` | no | no | no | no |
+| `shadowgraph_recall` | no | no | no | only with an embedder |
+| `shadowgraph_traverse` | no | no | no | no |
+| `shadowgraph_expand` | no | no | no | no |
+| `shadowgraph_validate` | no | no | no | no |
+| `shadowgraph_journal` | no | no | no | no |
+| `shadowgraph_rebuild` | no | no | no | no |
+| `shadowgraph_review_signals` | no | no | no | no |
 | `shadowgraph_purge_preview` | yes | no | yes | no |
-| `shadowgraph_repair_plan` | yes | no | yes | no |
-| `shadowgraph_redact` | yes | no | yes | no |
+| `shadowgraph_repair_plan` | no | no | no | no |
+| `shadowgraph_redact` | no | no | no | no |
 | `shadowgraph_record_decision` | no | no | no | no |
 | `shadowgraph_record_attempt` | no | no | no | no |
-| `shadowgraph_record_fact` | no | no | no | no |
-| `shadowgraph_record_outcome` | no | no | no | no |
+| `shadowgraph_record_fact` | no | **yes** | no | no |
+| `shadowgraph_record_outcome` | no | **yes** | no | no |
 | `shadowgraph_link` | no | no | no | no |
-| `shadowgraph_maintain` | no | no | no | no |
+| `shadowgraph_maintain` | no | **yes** | no | no |
 | `shadowgraph_review` | no | no | no | no |
 | `shadowgraph_context` | no | no | no | no |
-| `shadowgraph_remember` | no | no | no | only with an embedder |
-| `shadowgraph_confidence_evidence` | no | no | no | no |
-| `shadowgraph_update_status` | no | no | no | no |
-| `shadowgraph_supersede` | no | no | no | no |
-| `shadowgraph_verify_fact` | no | no | no | **yes** |
+| `shadowgraph_review_context` | no | no | no | no |
+| `shadowgraph_remember` | no | **yes** | no | only with an embedder |
+| `shadowgraph_confidence_evidence` | no | **yes** | no | no |
+| `shadowgraph_update_status` | no | **yes** | no | no |
+| `shadowgraph_supersede` | no | **yes** | no | no |
+| `shadowgraph_verify_fact` | no | **yes** | no | **yes** |
 | `shadowgraph_ack_review` | no | **yes** | no | no |
 | `shadowgraph_purge` | no | **yes** | no | no |
 | `shadowgraph_backup` | no | **yes** | no | yes |
 | `shadowgraph_restore` | no | **yes** | no | yes |
+| `shadowgraph_request_wider_access` | no | no | no | no |
+| `shadowgraph_revoke_grant` | no | no | no | no |
+| `shadowgraph_discard_access` | no | no | no | no |
+| `shadowgraph_bind` | **yes** | no | **yes** | no |
+| `shadowgraph_attribute` | **yes** | no | **yes** | no |
 
 Six of these are worth stating plainly, because a reader would otherwise guess wrong:
 
-- `shadowgraph_context` and `shadowgraph_review` **are not read-only**. Both evaluate reopen rules
-  and persist review signals, which is why the server saves after them.
-- **Only the eleven pure reads are idempotent.** Every other tool commits a new durable revision on
-  each successful call, even when the domain result is a no-op: re-acknowledging a signal, setting
-  the state a decision already has, repeating a supersession, remembering identical text, applying an
-  evidence key that was already counted, or re-verifying the same attestation all leave the domain
-  alone and still advance the store's revision. That revision is the concurrency token other writers
-  compare and the one `shadowgraph_redact` reports, so a repeat is not without effect on the
-  environment even when the visible result is unchanged.
+- `shadowgraph_review_context` and `shadowgraph_review` **are not read-only**. Both evaluate reopen
+  rules and persist review signals, which is why the server saves after them. `shadowgraph_context`
+  and the `shadowgraph://context` resource are reads: they persist no signal and commit no revision.
+  `shadowgraph_context` is still advertised as neither read-only nor idempotent, because a
+  grant-bearing call commits the declared access audit, as every grant-capable read does.
+- Grant-capable reads declare a possible audit write and are not advertised as
+  read-only or idempotent. Their ordinary own-scope read path still commits
+  nothing; the effects test retains that check and separately measures grant
+  reads. Lifecycle writes and ordinary writing tools advance the revision even
+  on a domain no-op. Outcome, status and acknowledgement now forward the
+  explicit project/origin or confirmed workspace scope; their successful
+  results and durable effects are covered by the conformance/effects suites.
 - `shadowgraph_ack_review` is **destructive**: it rewrites a signal's `status` and `acknowledgedAt`
   in place and appends nothing to the journal, so the previous acknowledgement cannot be recovered
   and a journal rebuild does not reconstruct it. A repeat replaces the timestamp again.
@@ -240,23 +465,11 @@ Six of these are worth stating plainly, because a reader would otherwise guess w
 - `shadowgraph_link` is **not** idempotent for a second reason beyond the revision: every call mints
   a new relation id, so repeating one duplicates the relationship. There is no unlink tool.
 
-### Output schemas, and two deliberate omissions
+### Output schemas and scope-coverage envelopes
 
-26 of the 28 full-mode tools (27 of 29 with a verifier configured, 13 of 14 in compact mode) declare
-an `outputSchema` and return `structuredContent` that conforms to it. Two do not:
+All 35 full-mode tools (36 with a verifier, 16 in compact mode) declare an object-rooted output schema. In structured protocol tiers their structuredContent matches the serialized text. Review and signal-history results now use `{ items, completeness }`, a deliberate breaking shape change; array consumers use `result.items`. Older protocol tiers still receive the same envelope in text.
 
-| Tool | Why no output schema |
-| --- | --- |
-| `shadowgraph_review` | Returns a bare JSON array of due decisions. |
-| `shadowgraph_review_signals` | Returns a bare JSON array of review signals. |
-
-`structuredContent` must be a JSON **object** for 2025-06-18 and 2025-11-25 clients, and the official
-TypeScript SDK additionally requires `outputSchema.type === "object"`. Wrapping either result would
-be a change to what the tool returns, not a change to how it is described, so both keep their shape,
-declare no schema, emit no structured content in any tier, and carry the return shape in their
-description instead. `test/mcp-tool-metadata.test.js` and `test/mcp-tool-conformance.test.js` both
-assert this exact pair, so an output schema cannot be added to one without the omission list being
-updated deliberately.
+The journal and rebuild schemas omit global envelope counters; redaction describes a marked scoped view rather than a complete store. The context schema permits unresolved project:null. Input-scoping limitations remain open.
 
 The schemas are written to be portable and, more importantly, to be **satisfiable by data imported
 from an older storage schema**. Advertising an output schema is a promise: a client that validates
@@ -292,7 +505,7 @@ re-labelled is a historical measurement falsified.
 | Compact 12, structured | n/a | 95,553 | **90,356** |
 | Description text, 27 tools | 3,712 chars | 18,429 chars | **8,515 chars** |
 
-The earlier surface was measured with `npm run size:mcp` on 2026-09-20 after
+The current surface, re-measured with `npm run size:mcp` on 2026-09-20 after
 `shadowgraph_reconsider` became the 28th full and 14th compact tool:
 
 | Mode and tier | Bare | Annotated | Structured |
@@ -300,23 +513,17 @@ The earlier surface was measured with `npm run size:mcp` on 2026-09-20 after
 | Full 28 | 43,711 | 46,651 | 187,359 |
 | Compact 14 | 30,958 | 32,433 | 123,799 |
 
-Compact paid the largest relative increase because the new tool was advertised there, and its
-structured cost was again `evaluatedConditionSchema` inlined — four more sites, for
+Compact pays the largest relative increase because the new tool is advertised there, and its
+structured cost is again `evaluatedConditionSchema` inlined — four more sites, for
 `triggeredRules`, `groundedConditions`, `rulesNotEvaluated` and `contestedConditions` — because
-this catalog forbids `$ref`, so a shared shape cannot be shared on the wire.
+this catalog forbids `$ref`, so a shared shape cannot be shared on the wire. What a structured
+client buys for those bytes is a reconsideration that states which conditions fired, which did not,
+and which could not be evaluated, instead of a bare due list.
 
-The current surface, re-measured on 2026-11-08 after the complete write fields and structured
-condition schemas were advertised:
-
-| Mode and tier | Bare | Annotated | Structured |
-| --- | ---: | ---: | ---: |
-| Full 28 | 46,582 | 49,522 | 190,230 |
-| Compact 16 | 35,805 | 37,492 | 141,284 |
-
-Output schemas account for 140,682 of the 190,230 bytes in the full structured tier. The increase
-above comes from the newly advertised write fields and structured-condition schemas. An output
-schema is a promise a validating client enforces, so trimming one to reduce a number would trade a
-real guarantee for a smaller figure.
+Output schemas account for 111,308 of the 155,847 bytes in the full structured tier, and they were
+not touched. An output schema is a promise a validating client enforces, so trimming one to reduce a
+number would trade a real guarantee for a smaller figure. The reduction above comes from the
+descriptions and from the input-schema property text that several tools share.
 
 ### Per-tool notes
 
@@ -327,25 +534,21 @@ Detail that used to sit in a description, kept here because it is worth having s
   declares what was omitted. The searchable content fields are listed in each tool's `query` property.
 - `shadowgraph_context` returns several named collections, each with its own `returned`, `total`,
   `hasMore`, and `omitted` under `completeness.collections`, so truncation is attributable.
-- `shadowgraph_record_decision` advertises `reviewAfter`; each alternative requires `label` and its
-  `reopenWhen` accepts both structured conditions and legacy string tokens. Structured rules use
-  stored facts, while legacy tokens match only ephemeral `changedFacts`.
-- `shadowgraph_record_attempt` requires `solution`, `result`, and `resultClass` in its advertised
-  schema and accepts `relatedTo` identifiers plus structured `reusableWhen` conditions. All reuse
-  conditions must hold, and unresolved conditions block reuse.
-- A structured condition requires `key` and `value`, with optional `operator` and `unit`. The operator
-  defaults to `equals`; explicit `null`, `false`, `0`, and empty-string operands remain valid values.
-- `shadowgraph_record_fact` requires `key` and `value` in its advertised schema and accepts
-  `observedAt`, `validFrom`, and nullable `validTo`. It rejects `verificationStatus` of `verified` or `expired`: verification is
-  not self-assertable and expiry belongs to `shadowgraph_maintain`. Writes for one key must arrive in
-  non-decreasing `validFrom` order.
+- `shadowgraph_record_decision` requires each alternative's `label`. Alternative `reopenWhen` and
+  attempt `reusableWhen` items accept legacy/symbolic strings and structured rules using stored facts.
+  Structured rules require `key`/`value` or `target`/`expected`; explicit `null`, `false`, `0`, and
+  empty-string operands are values, and an unresolved reuse condition blocks reuse.
+- `shadowgraph_record_attempt` requires `solution`, `result`, and `resultClass` for new MCP writes.
+- `shadowgraph_record_fact` requires `key` and `value` and rejects `verificationStatus` of `verified`
+  or `expired`: verification is not self-assertable and expiry belongs to `shadowgraph_maintain`.
+  Writes for one key must arrive in non-decreasing `validFrom` order.
 - `shadowgraph_record_outcome` appends a journal entry on every call, even when the outcome is
   identical, and a `failed` outcome makes the decision due for review.
 - `shadowgraph_update_status` rejects an illegal move before any record, event, journal, or durable
   change. The legal moves are listed in its `status` property. Over MCP the failure arrives as
-  `Tool execution failed (illegal_transition)` with safe `status` details in the era-specific error
-  location above; the exact transition text remains available through the library and HTTP surfaces,
-  where [the API reference](api-reference.md) lists it.
+  `Tool execution failed (illegal_transition)` with safe `status` details in the era-specific location
+  above; the exact transition text remains available through the library and HTTP surfaces, where
+  [the API reference](api-reference.md) lists it.
 - `shadowgraph_supersede` requires both decisions to exist, to differ, to share a project, and not to
   be already superseded or archived.
 - `shadowgraph_maintain` returns `{ at, staleDecisionIds, agedDecisionIds, reviewSignals, due }`,
@@ -362,19 +565,68 @@ Detail that used to sit in a description, kept here because it is worth having s
 
 ### Glama inspection profile
 
-Glama inspects this server in **full mode**, advertising all 28 tools. Compact mode is not used for
-inspection: the published `glama.json` schema accepts only `maintainers`, so there is no supported
-way to declare the compact environment variable or to disclose in the generated configuration that
-the listing was produced from a reduced surface. Advertising 16 tools while the server offers 28
-would understate what the server does, so the tool-count penalty is accepted instead.
+#### Accepted 0.43.2 release mapping (read back 2026-11-03)
 
-Glama's generated container does not talk to this server directly. It runs `mcp-proxy@6.4.3` in front
+The owner release view identifies display label `0.42.6` as ShadowGraph runtime
+`0.43.2`. The configured build explicitly checks out source
+`04ea6801ac1ee0b4aad2214841f38c95234cbd02`, asserts tree
+`0e0db8829040071b833a7e4ded02f39999f36fcf`, version `0.43.2` and
+`private: true`, and advertises the 20-tool Workflow profile. This is the accepted
+release, not a measurement of the v0.43.3 or v0.43.4 releases. A new deployment must have its
+own build/runtime read-back; the display counter is not a package version.
+
+#### Current release mapping (read back 2026-11-02)
+
+This is the historical read-back for that date. A later GitHub release does not
+prove a newer Glama runtime; verify the newly published build's source, tree,
+startup version and tools separately. The earlier build and this mapping remain
+valid historical evidence.
+
+The [Glama listing](https://glama.ai/mcp/servers/LiLara-AI/shadowgraph) and its
+existing published build use these distinct identities:
+
+| Field | Verified value |
+| --- | --- |
+| Glama release/display label | `0.42.5` |
+| MCP `serverInfo.version` in that build's startup log | `0.43.1` |
+| Profile | `SHADOWGRAPH_MCP_PROFILE=workflow`, compact `0`: 20 tools |
+| Clone bootstrap / Glama test Commit field | `13b78329a61e03fe294525f1976072a5304b484f` |
+| Actual checkout after the explicit build step | `becb5c3b9d6fd8cfdca9452184611c1fba0b313e` |
+| Actual tree asserted and printed by the build | `d3424175d98980f6029280b6d49bdf8284f4bce8` |
+
+The bootstrap is the normal main merge of the
+[v0.43.1 release source](https://github.com/LiLara-AI/shadowgraph/releases/tag/v0.43.1)
+and has the same tree. The following build step explicitly checks out the exact
+tagged source and asserts HEAD, tree, package version and `private: true` before
+installation. The retained startup log reports runtime `0.43.1`; the separately
+stored Glama release label remains `0.42.5`. This label does not identify the
+ShadowGraph runtime version. The current release/build admin views expose no
+in-place rename control, so the public listing explains the mapping while the
+existing image is preserved.
+
+The [public schema](https://glama.ai/mcp/servers/LiLara-AI/shadowgraph/schema)
+lists all 20 Workflow tools. The build logs verify their names, input/output
+object-schema types and four annotation hints. Glama truncates the raw
+`tools/list` transport string; full remote nested-schema/description equality is
+not claimed. These are readbacks of the existing published build, with no new
+deployment, live model test or expansion of host support.
+
+#### Historical inspection profile (0.42.1)
+
+The published v0.42.1 Glama build observed on 2026-10-25 uses **compact mode**, advertising 16
+tools, with `SHADOWGRAPH_MCP_COMPACT=1` in its container build configuration. `glama.json` is
+maintainer metadata, not the container's environment configuration. The listing describes both
+compact and full inventories. Neither mode removes stored data or the full-mode implementations.
+
+Glama's observed v0.42.1 container runs `mcp-proxy@6.7.16` in front
 of `node ./src/cli.js mcp` and scans over HTTP, so what the proxy requests, what this server
 negotiates with it, and whether the tool list survives that hop are properties of the pair. None of
 them can be established by pointing a different client at the server, which is why they have their
 own gate rather than a note.
 
-`npm run check:glama`, also run by `npm run check:mcp`, starts that exact pinned proxy through `npx`
+`npm run check:glama`, also run by `npm run check:mcp`, remains a historical compatibility gate
+for pinned `mcp-proxy@6.4.3` in full mode. It is not a reproduction of the current remote build.
+It starts that pinned proxy through `npx`
 with no dependency added to the package, binds it to the loopback interface only, and puts a
 transparent stdio recorder between the proxy and `node src/cli.js mcp`, the command that container
 runs. It then behaves as the scanner does,
@@ -384,8 +636,8 @@ over streamable HTTP, and asserts the recording and the HTTP replies against eac
   `protocolVersion: "2025-11-25"`;
 - this server negotiates `2025-11-25` with it, asserted by equality, so a silent fall-back to an
   older revision fails the gate instead of quietly hiding metadata from Glama;
-- the `tools/list` the scanner receives over HTTP is exactly 28 tools, each with four boolean
-  annotations, and an object-rooted `outputSchema` on every tool except the two documented omissions;
+- the `tools/list` the scanner receives over HTTP is exactly 35 tools, each with four boolean
+  annotations, and an object-rooted `outputSchema` on every tool;
 - that list is deep-equal to the one the server wrote to stdio, so the proxy forwarded it without
   dropping or rewriting a member. The comparison is deep rather than byte-for-byte because the
   proxy rebuilds each tool through its bundled SDK schema, which may reorder keys.
@@ -396,7 +648,7 @@ with the scanner over HTTP; that value is a property of the proxy's SDK, not of 
 
 Measured on 2026-09-03, on the 27-tool surface of that date: `requested=2025-11-25
 negotiated=2025-11-25 http=2025-11-25 tools=27 annotated=27 outputSchemas=25 forwarded=deep-equal`.
-The gate now asserts 28 tools and 26 output schemas; the reading above is left as it was taken.
+The gate now asserts 35 tools and 35 output schemas; the reading above is left as it was taken.
 
 **Residual risk.** Only the pinned proxy is under test. Glama's own scanner client, the revision it
 declares to the proxy, and how it renders what it receives are not reproduced here. The proxy version
@@ -409,9 +661,6 @@ None of these are defects in the current release, and none were changed to impro
 
 - no `shadowgraph_unlink`: a relationship is removed only by purging its project;
 - no apply counterpart to `shadowgraph_repair_plan`;
-- `shadowgraph_review` and `shadowgraph_review_signals` return bare arrays rather than the
-  `{ items, page, completeness }` envelope every other read path uses, which is also what prevents an
-  output schema;
 - naming is mixed (bare verbs, `verb_object`, noun phrases, one abbreviation), and renaming a tool
   is a breaking change for every existing client configuration.
 
@@ -428,20 +677,20 @@ they cannot run. CI installs those external clients from the isolated
 `tooling/mcp-gates/package-lock.json` before the live gates; in a source checkout without that local
 tooling install, the scripts fall back to the same exact versions through `npx`.
 
-`scripts/check-mcp.mjs` invokes pinned official `@modelcontextprotocol/inspector@2.4.0` twice with `tools/list --strict --format json`. It fails when:
+`scripts/check-mcp.mjs` invokes pinned official `@modelcontextprotocol/inspector@2.11.0` twice with `tools/list --strict --format json`. It fails when:
 
 - Inspector exits non-zero;
 - Inspector writes any strict schema finding to stderr;
-- Full mode is not exactly 28 tools without a verifier;
+- Full mode is not exactly 35 tools without a verifier;
 - Compact mode is not exactly 16 tools;
 - any advertised tool is missing one of the four boolean annotations;
-- any tool other than the two documented omissions is missing an object-rooted `outputSchema`.
+- any tool is missing an object-rooted `outputSchema`.
 
 Measured on 2026-09-03, that Inspector requests `protocolVersion: "2025-11-25"`, which this server
 implements and echoes, so the strict run exercises the structured tier by genuine negotiation.
 
 `scripts/check-glama-proxy.mjs`, also runnable alone as `npm run check:glama`, starts pinned
-`mcp-proxy@6.4.3` — the proxy in Glama's generated container — in front of `node src/cli.js mcp`, the
+`mcp-proxy@6.4.3` — the historical proxy used by this local compatibility gate — in front of `node src/cli.js mcp`, the
 command that container runs, with a stdio recorder between them, and drives it over streamable HTTP as Glama's scanner would (§4). It
 fails when:
 
@@ -449,7 +698,7 @@ fails when:
 - the proxy sends anything other than exactly one `initialize`, or requests a revision other than
   `2025-11-25`;
 - this server negotiates anything other than `2025-11-25` with it;
-- the `tools/list` received over HTTP is not exactly 28 tools with the annotation and output-schema
+- the `tools/list` received over HTTP is not exactly 35 tools with the annotation and output-schema
   coverage above;
 - that list is not deep-equal to the one the server wrote to stdio.
 
@@ -457,8 +706,8 @@ The CI matrix installs the locked gate clients and runs both gates on Node 24 on
 Windows. `test/check-glama-proxy.test.js` covers the gate's own recorder, event-stream parser, and
 assertions offline, including that each assertion rejects the failure it exists to catch;
 `test/mcp-gate-tooling.test.js` binds the scripts and CI workflow to the exact tooling lock.
-Unit/integration tests separately prove the configured-verifier full count is 28 and compact
-remains 12.
+Unit/integration tests separately prove the configured-verifier full count is 36 and compact
+remains 16.
 
 ## 6. Primary sources consulted
 
@@ -476,3 +725,30 @@ remains 12.
 ## 7. Verification boundary
 
 Automated raw-stdio tests prove exact dual-era payloads and errors, prove what each negotiated revision advertises and returns, prove batch receiving and its revision boundary, and exercise every tool that declares an output schema against a real store so the advertised schema is checked against the result the tool actually returns. The official Inspector proves strict tool-schema portability, exact full/compact counts, and that a real client using the official SDK accepts the annotations and output schemas on this machine. The pinned Glama proxy gate proves what that proxy requests, what this server negotiates with it, and that the tool list reaches an HTTP scanner unchanged; it does not exercise Glama’s own scanner. This does not by itself measure every third-party host, network transport, latency, answer quality, or future protocol revision.
+
+## Creation identity and scope alignment
+
+Creation inputs reject caller-supplied canonical IDs; reference IDs remain
+supported. See [creation identity](contracts/creation-identity.md). A policy
+violation anywhere in a supported JSON-RPC batch prevents every member from
+running. This preflight does not make arbitrary tool batches transactional.
+
+The context resource resolves the current confirmed workspace binding through
+the same access context as tools, inside the existing serialized persistence
+path. It still evaluates and persists review signals; no read/evaluate split
+is introduced. Unresolved context project identity is nullable. Link and
+traverse describe the request boundary for every entity kind; an out-of-scope
+root is indistinguishable from an absent root. `memoryOnly` is a boolean restore
+input and retains mandatory validation and recovery semantics.
+
+PR13 metadata wire measurements (bare / annotated / structured bytes): full
+54,921 / 58,409 / 239,685; full with verifier 56,069 / 59,662 / 244,232; compact
+34,848 / 36,331 / 151,693. The engineering ceilings retain about 2% headroom
+where necessary; the compact structured ceiling is unchanged. These changes
+cover explicit scope inputs and truthful creation/restore contracts, not
+benchmark campaign or audit-operation performance thresholds.
+
+Plan v1.4.4 PR-26 and PR-27 wire measurements (bare / annotated / structured bytes, 2026-09-29), after the
+default read's relevance block and `shadowgraph_expand`: full 58,789 / 62,489 / 298,375; full with verifier
+59,937 / 63,742 / 302,922; compact 38,716 / 40,411 / 210,383. The ceilings these planned additions exceed are
+re-set with about 2% headroom, recorded in `test/mcp-tool-metadata.test.js`.

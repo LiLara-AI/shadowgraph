@@ -20,6 +20,7 @@ import { createShadowGraph } from '../src/shadowgraph.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
 import { createJsonFileStore } from '../src/storage.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
+import { privilegedSnapshot } from '../src/internal/snapshot.js';
 
 const NODE_SQLITE = (await getRuntimeCapabilities()).nodeSqlite;
 const SQLITE_TEST_OPTIONS = NODE_SQLITE.available ? {} : { skip: NODE_SQLITE.reason };
@@ -97,7 +98,7 @@ test('a condition that cannot be evaluated is manual_review and partial, never a
   assert.equal(entry.rulesNotEvaluated.length, 1);
   assert.equal(entry.rulesNotEvaluated[0].verdict, 'unknown');
   assert.match(entry.rulesNotEvaluated[0].reason, /No fact recorded/);
-  assert.equal(graph.getReviewSignals({ project: 'p' }).length, 0, 'and it raises no review signal');
+  assert.equal(graph.getReviewSignals({ project: 'p' }).items.length, 0, 'and it raises no review signal');
 });
 
 test('one rule firing while another is unevaluable recommends review AND reports partial', () => {
@@ -150,7 +151,7 @@ test('every operator the evaluator advertises reaches reconsideration with the s
     assert.equal(reported.verdict, expected, `${operator}: reconsideration must not re-decide the verdict`);
 
     // And the decision-level reading has to follow from that same verdict.
-    const due = graph.review({ project: 'p' });
+    const due = graph.review({ project: 'p' }).items;
     assert.equal(due.length, expected === 'true' ? 1 : 0, `${operator}: review() must agree about firing`);
     assert.equal(
       entry.verdict,
@@ -169,7 +170,7 @@ test('a declared unit converts identically for review and for reconsideration', 
   // Same quantity, expressed in the other unit the rule can read.
   graph.addFact({ project: 'p', key: 'replicaLag', value: '1500ms', sourceClass: 'tool_observed' });
 
-  assert.equal(graph.review({ project: 'p' }).length, 1, 'review converts and fires');
+  assert.equal(graph.review({ project: 'p' }).items.length, 1, 'review converts and fires');
   const entry = only(graph.reconsider({ project: 'p' }));
   assert.equal(entry.verdict, 'review_recommended', 'and reconsideration reaches the same answer');
   assert.equal(entry.triggeredRules[0].unit, 's', 'the rule unit travels with the breach');
@@ -179,7 +180,7 @@ test('a declared unit converts identically for review and for reconsideration', 
   const other = createShadowGraph();
   decisionWith(other, { key: 'replicaLag', operator: 'gte', value: 1, unit: 's' });
   other.addFact({ project: 'p', key: 'replicaLag', value: '40%', sourceClass: 'tool_observed' });
-  assert.equal(other.review({ project: 'p' }).length, 0);
+  assert.equal(other.review({ project: 'p' }).items.length, 0);
   const refused = only(other.reconsider({ project: 'p' }));
   assert.equal(refused.verdict, 'manual_review');
   assert.equal(refused.evaluationCompleteness, 'partial');
@@ -218,14 +219,14 @@ test('a stored string rule with nothing supplied is reported unevaluated, not pa
   assert.equal(entry.rulesNotEvaluated[0].expected, 'deployment model changed');
   assert.equal(entry.rulesNotEvaluated[0].key, null);
   assert.match(entry.rulesNotEvaluated[0].reason, /cannot settle from stored facts/);
-  assert.equal(graph.getReviewSignals({ project: 'p' }).length, 0, 'an unevaluated condition raises nothing');
+  assert.equal(graph.getReviewSignals({ project: 'p' }).items.length, 0, 'an unevaluated condition raises nothing');
 });
 
 test('the legacy string form still matches changedFacts, unchanged, on both routes', () => {
   const graph = createShadowGraph();
   decisionWith(graph, 'deployment model changed');
 
-  assert.equal(graph.review({ project: 'p', changedFacts: ['deployment model changed'] }).length, 1);
+  assert.equal(graph.review({ project: 'p', changedFacts: ['deployment model changed'] }).items.length, 1);
   const entry = only(graph.reconsider({ project: 'p', changedFacts: ['deployment model changed'] }));
   assert.equal(entry.verdict, 'review_recommended');
   assert.equal(entry.evaluationCompleteness, 'complete', 'a matched token is settled, not uncertain');
@@ -242,8 +243,8 @@ test('a verdict resting on facts that disagree is reported apart, and withholds 
   // A second, equally applicable observation of the same key that disagrees.
   // Imported rather than written, because a second write of the same key
   // supersedes the first instead of contesting it.
-  const snapshot = seed.exportData();
-  snapshot.facts = [...snapshot.facts, { ...snapshot.facts[0], id: 'fact:contested', value: '900ms' }];
+  const snapshot = privilegedSnapshot(seed);
+  snapshot.facts = [...snapshot.facts, { ...snapshot.facts[0], id: 'fact:contested', value: '900ms', erasureToken: 'tok_contested' }];
   const graph = createShadowGraph();
   graph.importData(snapshot);
 
@@ -268,8 +269,8 @@ test('a contested false condition is contested, not a grounded negative', () => 
   const seed = createShadowGraph();
   decisionWith(seed, { key: 'replicaLagMs', operator: 'greater_than', value: 500, unit: 'ms' });
   seed.addFact({ project: 'p', key: 'replicaLagMs', value: '20ms', sourceClass: 'measured', validFrom: '2026-03-01T00:00:00Z' });
-  const snapshot = seed.exportData();
-  snapshot.facts = [...snapshot.facts, { ...snapshot.facts[0], id: 'fact:contested', value: '30ms' }];
+  const snapshot = privilegedSnapshot(seed);
+  snapshot.facts = [...snapshot.facts, { ...snapshot.facts[0], id: 'fact:contested', value: '30ms', erasureToken: 'tok_contested' }];
   const graph = createShadowGraph();
   graph.importData(snapshot);
 
@@ -321,11 +322,13 @@ test('an unaddressable decision is an error, never an empty unchanged result', (
   // and this decision is fine", which is the confusion the whole contract
   // exists to prevent.
   assert.throws(() => graph.reconsider({ project: 'p', decisionId: 'decision_does_not_exist' }), /Decision not found/);
-  assert.throws(() => graph.reconsider({ project: 'other', decisionId: mine.id }), /not accessible in this project/);
+  // Another project's decision gets exactly the answer of one that does not
+  // exist, so the error never says whether the id exists elsewhere (F-31).
+  assert.throws(() => graph.reconsider({ project: 'other', decisionId: mine.id }), /^Error: Decision not found$/);
   assert.throws(() => graph.reconsider({ project: 'p', decisionId: '' }), /decisionId must be a non-empty string/);
 
   // An id that exists but is closed is equally not a grounded negative.
-  graph.updateDecisionStatus(mine.id, 'archived');
+  graph.updateDecisionStatus(mine.id, 'archived', { project: 'p' });
   assert.throws(() => graph.reconsider({ project: 'p', decisionId: mine.id }), /not open for reconsideration/);
 });
 
@@ -343,7 +346,7 @@ test('a focused reconsideration evaluates only its decision and raises no signal
   assert.equal(result.scope.decisionId, focused.id);
   assert.equal(result.scope.project, 'p');
 
-  const signals = graph.getReviewSignals({ project: 'p' });
+  const signals = graph.getReviewSignals({ project: 'p' }).items;
   assert.equal(signals.length, 1, 'and only that decision raises a signal');
   assert.equal(signals[0].decisionId, focused.id);
   assert.ok(!signals.some((item) => item.decisionId === sibling.id), 'the sibling was never evaluated');
@@ -358,30 +361,30 @@ test('reconsidering twice settles on one signal, and an acknowledgement survives
 
   const first = only(graph.reconsider({ project: 'p' }));
   const second = only(graph.reconsider({ project: 'p' }));
-  assert.equal(graph.getReviewSignals({ project: 'p' }).length, 1, 'the identity is the one review() already uses');
+  assert.equal(graph.getReviewSignals({ project: 'p' }).items.length, 1, 'the identity is the one review() already uses');
   assert.equal(second.reviewSignalId, first.reviewSignalId);
   assert.equal(second.reviewSignalStatus, 'open');
 
-  graph.acknowledgeReview(first.reviewSignalId);
+  graph.acknowledgeReview(first.reviewSignalId, { project: 'p' });
   const third = only(graph.reconsider({ project: 'p' }));
   assert.equal(third.reviewSignalId, first.reviewSignalId, 'no second signal for the same breach');
   assert.equal(third.reviewSignalStatus, 'acknowledged');
   assert.equal(third.verdict, 'review_recommended', 'an acknowledgement settles the signal, not the evidence');
 
   // review() raises nothing new either, which is what shared identity means.
-  graph.review({ project: 'p' });
-  assert.equal(graph.getReviewSignals({ project: 'p' }).length, 1);
+  graph.review({ project: 'p' }).items;
+  assert.equal(graph.getReviewSignals({ project: 'p' }).items.length, 1);
 });
 
 test('reconsideration never moves decision status, confidence or lifecycle state', () => {
   const graph = createShadowGraph();
   const decision = decisionWith(graph, { key: 'replicaLagMs', operator: 'gte', value: 500 });
   graph.addFact({ project: 'p', key: 'replicaLagMs', value: 900, sourceClass: 'tool_observed' });
-  const before = graph.exportData().records.find((item) => item.id === decision.id);
+  const before = privilegedSnapshot(graph).records.find((item) => item.id === decision.id);
 
   graph.reconsider({ project: 'p' });
 
-  const after = graph.exportData().records.find((item) => item.id === decision.id);
+  const after = privilegedSnapshot(graph).records.find((item) => item.id === decision.id);
   assert.equal(after.status, before.status, 'status is untouched');
   assert.deepEqual(after.confidence, before.confidence, 'confidence is untouched');
   assert.deepEqual(after.alternatives, before.alternatives, 'the stored rule is never rewritten by evaluating it');
@@ -389,13 +392,13 @@ test('reconsideration never moves decision status, confidence or lifecycle state
 
 // --- L: review() keeps its public contract ---------------------------------
 
-test('review() returns exactly what it returned before reconsideration existed', () => {
+test('review() preserves due-entry content inside its scope-coverage envelope', () => {
   const graph = createShadowGraph();
   decisionWith(graph, { key: 'replicaLagMs', operator: 'gte', value: 500 });
   graph.addFact({ project: 'p', key: 'replicaLagMs', value: 900, sourceClass: 'tool_observed' });
 
-  const due = graph.review({ project: 'p' });
-  assert.ok(Array.isArray(due), 'still a bare array of due decisions');
+  const due = graph.review({ project: 'p' }).items;
+  assert.ok(Array.isArray(due), 'the items remain an array of due decisions');
   assert.deepEqual(Object.keys(due[0]).sort(), [
     'alternativesToReconsider', 'decisionId', 'reason', 'reviewSignalId', 'reviewSignalStatus', 'title', 'violatedConditions'
   ], 'no reconsideration field leaked onto the review entry');
@@ -404,7 +407,7 @@ test('review() returns exactly what it returned before reconsideration existed',
   // the same graph is asked twice with a reconsideration in between. Only the
   // generated ids differ between runs, and here there are none to differ.
   graph.reconsider({ project: 'p' });
-  assert.deepEqual(graph.review({ project: 'p' }), due, 'reconsidering first changes nothing review() reports');
+  assert.deepEqual(graph.review({ project: 'p' }).items, due, 'reconsidering first changes nothing review() reports');
 });
 
 test('a decision with no reopen rules is unchanged and complete, with nothing invented', () => {
@@ -427,7 +430,7 @@ test('reconsideration survives a restart and is derived purely from stored state
   const original = createShadowGraph();
   decisionWith(original, { key: 'replicaLagMs', operator: 'gte', value: 500 });
   original.addFact({ project: 'p', key: 'replicaLagMs', value: 900, sourceClass: 'tool_observed' });
-  await store.save(original.exportData());
+  await store.save(privilegedSnapshot(original));
 
   // A brand new graph, state loaded from disk only. The new session does not
   // know which facts changed and supplies nothing.
@@ -444,7 +447,7 @@ test('reconsideration reads the same answer from JSON and from SQLite', async (t
   const source = createShadowGraph();
   decisionWith(source, { key: 'replicaLagMs', operator: 'gte', value: 500 });
   source.addFact({ project: 'p', key: 'replicaLagMs', value: 900, sourceClass: 'tool_observed' });
-  const snapshot = source.exportData();
+  const snapshot = privilegedSnapshot(source);
   const results = {};
 
   for (const backend of ['json', 'sqlite']) {

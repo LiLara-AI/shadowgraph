@@ -11,6 +11,7 @@ import { createShadowGraph } from '../src/shadowgraph.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
 import { createJsonFileStore } from '../src/storage.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
+import { privilegedSnapshot } from '../src/internal/snapshot.js';
 
 const NODE_SQLITE = (await getRuntimeCapabilities()).nodeSqlite;
 const SQLITE_TEST_OPTIONS = NODE_SQLITE.available ? {} : { skip: NODE_SQLITE.reason };
@@ -69,24 +70,24 @@ test('a valid complete rule is unaffected', () => {
 // A decision carrying one rule, imported so lenient storage keeps it verbatim.
 function graphWithStoredRule(rule, factValue) {
   const seed = createShadowGraph();
-  seed.addDecision({
+  seed.importData({ records: [{ kind: 'decision',
     project: 'p', id: 'decision:d1', title: 't', chosen: 'c',
     alternatives: [{ id: 'alternative:a1', label: 'alt-1', reasonRejected: 'r', reopenWhen: [{ key: 'lag', operator: 'gte', value: 1 }] }]
-  });
-  const snapshot = seed.exportData();
+   }] });
+  const snapshot = privilegedSnapshot(seed);
   snapshot.records[0].alternatives[0].reopenWhen = [rule];
   const graph = createShadowGraph();
   graph.importData(snapshot);
-  graph.addFact({ project: 'p', key: 'lag', value: factValue, id: 'fact:lag' });
+  graph.addFact({ project: 'p', key: 'lag', value: factValue, });
   return graph;
 }
 
 test('an imported rule with no operand raises no review and is visible as a diagnostic', () => {
   const graph = graphWithStoredRule({ key: 'lag', operator: 'not_equals' }, 500);
 
-  const view = graph.context({ project: 'p' });
+  const view = graph.reviewContext({ project: 'p' });
   assert.equal(view.openReviews.length, 0, 'a rule that states no operand is not a breach');
-  assert.equal(graph.getReviewSignals({ project: 'p' }).length, 0, 'and raises no signal');
+  assert.equal(graph.getReviewSignals({ project: 'p' }).items.length, 0, 'and raises no signal');
 
   const condition = view.conditionDiagnostics.flatMap((item) => item.conditions)[0];
   assert.ok(condition, 'the unevaluable condition is reported');
@@ -96,9 +97,9 @@ test('an imported rule with no operand raises no review and is visible as a diag
 
 test('the stored rule is never rewritten by evaluating it', () => {
   const graph = graphWithStoredRule({ key: 'lag', operator: 'not_equals' }, 500);
-  graph.context({ project: 'p' });
-  graph.maintain({});
-  const stored = graph.exportData().records[0].alternatives[0].reopenWhen[0];
+  graph.reviewContext({ project: 'p' });
+  graph.maintain({ project: 'p' });
+  const stored = privilegedSnapshot(graph).records[0].alternatives[0].reopenWhen[0];
   assert.deepEqual(stored, { key: 'lag', operator: 'not_equals' }, 'no operand was synthesised');
 });
 
@@ -110,14 +111,14 @@ test('the stored rule is never rewritten by evaluating it', () => {
 // acknowledged signal whose recorded breach is `historical`.
 function graphWithLegacySignal({ rule, historical, factValue }) {
   const seed = createShadowGraph();
-  seed.addDecision({
+  seed.importData({ records: [{ kind: 'decision',
     project: 'p', id: 'decision:d1', title: 't', chosen: 'c',
     // Seeded with a valid rule, then replaced in the snapshot: write-time
     // validation rejects an operandless rule, so only the lenient import path
     // can carry one.
     alternatives: [{ id: 'alternative:a1', label: 'alt-1', reasonRejected: 'r', reopenWhen: [{ key: 'lag', operator: 'gte', value: 1 }] }]
-  });
-  const snapshot = seed.exportData();
+   }] });
+  const snapshot = privilegedSnapshot(seed);
   snapshot.records[0].alternatives[0].reopenWhen = [rule];
   snapshot.reviewSignals = [{
     id: 'review:legacy',
@@ -141,12 +142,12 @@ function graphWithLegacySignal({ rule, historical, factValue }) {
   }];
   const graph = createShadowGraph();
   graph.importData(snapshot);
-  graph.addFact({ project: 'p', key: 'lag', value: factValue, id: 'fact:lag' });
+  graph.addFact({ project: 'p', key: 'lag', value: factValue, });
   return graph;
 }
 
-const reviewStatus = (graph) => graph.context({ project: 'p' }).openReviews[0]?.reviewSignalStatus ?? 'none';
-const legacyOf = (graph) => graph.getReviewSignals({ project: 'p' }).find((item) => item.id === 'review:legacy');
+const reviewStatus = (graph) => graph.reviewContext({ project: 'p' }).openReviews[0]?.reviewSignalStatus ?? 'none';
+const legacyOf = (graph) => graph.getReviewSignals({ project: 'p' }).items.find((item) => item.id === 'review:legacy');
 
 test('a historical condition missing its expected operand is not reconstructable', () => {
   const graph = graphWithLegacySignal({
@@ -184,9 +185,9 @@ test('a rule with no operand cannot inherit a legacy acknowledgement', () => {
     factValue: 500
   });
 
-  assert.equal(graph.context({ project: 'p' }).openReviews.length, 0, 'a rule stating no operand is not a breach at all');
+  assert.equal(graph.reviewContext({ project: 'p' }).openReviews.length, 0, 'a rule stating no operand is not a breach at all');
   assert.equal(reviewStatus(graph), 'none');
-  const condition = graph.context({ project: 'p' }).conditionDiagnostics.flatMap((item) => item.conditions)[0];
+  const condition = graph.reviewContext({ project: 'p' }).conditionDiagnostics.flatMap((item) => item.conditions)[0];
   assert.equal(condition.verdict, 'unknown', 'it is reported as unevaluable');
   assert.equal(legacyOf(graph).status, 'acknowledged', 'and the legacy signal is untouched');
   assert.equal(legacyOf(graph).coverage, undefined);
@@ -196,10 +197,10 @@ test('an operandless rule does not poison export or context', () => {
   const graph = graphWithStoredRule({ key: 'lag', operator: 'not_equals' }, 500);
   // Writing `value: undefined` during import used to make every later clone()
   // of the record throw, taking exportData() and context() down with it.
-  assert.doesNotThrow(() => graph.exportData());
-  assert.doesNotThrow(() => graph.context({ project: 'p' }));
+  assert.doesNotThrow(() => graph.exportData({ project: 'p' }));
+  assert.doesNotThrow(() => graph.reviewContext({ project: 'p' }));
   assert.deepEqual(
-    graph.exportData().records[0].alternatives[0].reopenWhen[0],
+    privilegedSnapshot(graph).records[0].alternatives[0].reopenWhen[0],
     { key: 'lag', operator: 'not_equals' },
     'and the rule round-trips exactly as stored'
   );
@@ -274,7 +275,7 @@ test('an exact complete historical condition still preserves the acknowledgement
     factValue: 600
   });
   assert.equal(reviewStatus(graph), 'acknowledged');
-  assert.equal(graph.context({ project: 'p' }).openReviews[0].reviewSignalId, 'review:legacy');
+  assert.equal(graph.reviewContext({ project: 'p' }).openReviews[0].reviewSignalId, 'review:legacy');
 });
 
 test('a falsy historical operand is a real operand and still reconstructs', () => {
@@ -291,7 +292,7 @@ test('a falsy historical operand is a real operand and still reconstructs', () =
       factValue: fact
     });
     assert.equal(reviewStatus(graph), 'acknowledged', `expected: ${JSON.stringify(operand)} must reconstruct`);
-    assert.equal(graph.context({ project: 'p' }).openReviews[0].reviewSignalId, 'review:legacy');
+    assert.equal(graph.reviewContext({ project: 'p' }).openReviews[0].reviewSignalId, 'review:legacy');
   }
 });
 
@@ -324,7 +325,7 @@ test('an unreconstructable legacy signal survives a restart untouched', async (t
     factValue: 600
   });
   assert.equal(reviewStatus(graph), 'open');
-  await store.save(graph.exportData());
+  await store.save(privilegedSnapshot(graph));
 
   const restored = createShadowGraph();
   restored.importData(await store.load());
@@ -342,7 +343,7 @@ test('operand handling is identical on JSON and SQLite', async (t) => {
     historical: { operator: 'gte' },
     factValue: 600
   });
-  const snapshot = source.exportData();
+  const snapshot = privilegedSnapshot(source);
   const results = {};
 
   for (const backend of ['json', 'sqlite']) {
@@ -374,11 +375,11 @@ test('the compact list and acknowledge path settles the uncovered breach', () =>
     historical: { operator: 'gte' },
     factValue: 600
   });
-  const listed = graph.context({ project: 'p' }).openReviews[0];
+  const listed = graph.reviewContext({ project: 'p' }).openReviews[0];
   assert.equal(listed.reviewSignalStatus, 'open');
   assert.notEqual(listed.reviewSignalId, 'review:legacy');
 
-  graph.acknowledgeReview(listed.reviewSignalId);
+  graph.acknowledgeReview(listed.reviewSignalId, { project: 'p' });
   assert.equal(reviewStatus(graph), 'acknowledged');
   assert.equal(legacyOf(graph).acknowledgedAt, '2026-01-02T00:00:00.000Z', 'the historical record is untouched');
 });

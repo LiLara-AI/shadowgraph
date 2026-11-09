@@ -34,12 +34,12 @@ test('retry and scope guidance starts before the first write', () => {
   assert.match(policy, /run-scoped memory does not automatically survive across runs/i);
 });
 
-test('current-facing compact guidance advertises 16 tools', () => {
+test('current-facing guidance preserves the v0.44 profile inventories', () => {
   assert.match(read('integrations/README.md'), /SHADOWGRAPH_MCP_COMPACT=1`: 16 workflow tools/);
-  assert.match(read('integrations/README.md'), /verifies 28 full and 16 compact tools/);
+  assert.match(read('integrations/README.md'), /verifies 35 full and 16 compact tools/);
   assert.match(read('docs/unified-memory.md'), /Compact mode includes both workflows and remains exactly 16 tools\./);
-  assert.match(read('docs/api-reference.md'), /SHADOWGRAPH_MCP_COMPACT=1` advertises 16 tools instead of 28\./);
-  assert.match(read('.github/workflows/ci.yml'), /Strict MCP Inspector \(28 full \/ 16 compact\)/);
+  assert.match(read('docs/api-reference.md'), /SHADOWGRAPH_MCP_COMPACT=1` advertises 16 tools instead of 35\./);
+  assert.match(read('.github/workflows/ci.yml'), /Strict MCP Inspector \(35 full \/ 16 compact \/ 20 workflow\)/);
 });
 
 test('Phase 1A release notes disclose the compatibility boundary', () => {

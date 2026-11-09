@@ -1,5 +1,8 @@
 # Product cycle — checkpoint
 
+> **Historical.** A checkpoint from a product cycle before the 0.41.0 Technical Preview. Its branch,
+> test counts and backlog describe that time, not `main`.
+
 Branch `feat/decision-review-and-retrieval`, cut from verified `origin/main`
 @ `2d932919df397158281b20dbc1ed76dde8a1a90f` (confirmed by fetch, not assumed).
 Local commits only. No push, no merge to main. Arabic summary: `docs/handoff/summary-ar.md`.

@@ -34,7 +34,7 @@ separately:
   declared in `completeness.collections.conditionDiagnostics` with `returned`/`total`/`hasMore`/
   `omitted`. It is never silently truncated and never unbounded.
 - `maintain().diagnostics` — the same entries, on an already-object return.
-- `review()` is **unchanged**: it still returns a bare array of due decisions.
+- `review()` preserves its due-entry content and now wraps it in `{ items, completeness }` for truthful scope coverage.
 - `reconsider()` reports the same conditions as a top-level reading — see §11.
 
 A diagnostic is **not** a review signal. It asserts neither a breach nor a confirmed-safe decision.
@@ -117,7 +117,7 @@ observation time.
 **Returned details are detached (changed 2026-09-14).** **Every field** of a caller-visible detail
 is a copy, not a reference into the stored rule or the stored fact — `expected`, `observed`,
 `evidence` and `conflictingEvidence`, and equally `key`, `operator`, `unit`, the `title` and
-`alternativesToReconsider` on a due entry, and `solution` on a reusable attempt. A caller holding a
+`alternativesToReconsider` on a due entry (`affectedAlternatives` in `context()`), and `solution` on a reusable attempt. A caller holding a
 returned condition — through `violatedConditions`, `conditionDiagnostics`,
 `reusableAttempts[].satisfiedConditions`, or `maintain().due` / `.diagnostics` — may mutate it
 freely: records, facts, relations, review signals and the journal are unaffected, later responses
@@ -187,7 +187,7 @@ both fixed by omitting the field instead:
 
 ## 8. Acknowledging a review (changed 2026-09-14)
 
-Entries in `review()`, `maintain().due` and `context().openReviews` carry two additive fields:
+Entries in `review()`, `maintain().due` and `context().firedConditions` (`reviewContext().openReviews`) carry two additive fields:
 
 | Field | Meaning |
 | --- | --- |
@@ -227,7 +227,7 @@ The invariant is that **an acknowledgement covers exactly the breach set it ackn
 
 - the same conditions still breached → still `acknowledged`;
 - an additional, previously unacknowledged condition breaching → a **separate** signal, `open` and
-  visible in `context().openReviews` and `getReviewSignals({ status: 'open' })`;
+  visible in `context().firedConditions` and `getReviewSignals({ status: 'open' })`;
 - the breach set narrowing back to the acknowledged one → that signal, still `acknowledged`.
 
 `coverage` is persisted on the signal and travels through export, import and restart. It is
@@ -290,6 +290,11 @@ acknowledge one, and the only path to an id was `shadowgraph_maintain` — which
 and expires facts, making it a maintenance write rather than a listing route. Listing reuses
 `shadowgraph_context`; no tool was invented.
 
+Since plan v1.4.4 PR-16 (15 compact tools), `shadowgraph_context` is the default-path read: it
+reports the id of a signal that already exists and persists none. The evaluate-and-persist
+behaviour it used to have — raising a signal, and so producing the id the acknowledgement tool
+needs — is `shadowgraph_review_context`.
+
 **Durability, stated precisely.** An acknowledgement survives a normal **process restart**, because
 review signals are part of the persisted payload. It is **not** reconstructed by `rebuild()`:
 signals are not journalled, so a projection rebuilt from the journal alone does not carry
@@ -328,7 +333,7 @@ conditions are all structured and satisfied are unaffected. As everywhere else i
 the recorded failure stands either way.
 
 A reported attempt **may be reconsidered**. It is not authorisation to retry, and the recorded
-failure is untouched: a reusable attempt still appears in `failedAttemptsToAvoid`, and its stored
+failure is untouched: a reusable attempt still appears in `failedAttempts`, and its stored
 `result` and `resultClass` are unchanged.
 
 ### Attempt result classification
@@ -339,13 +344,26 @@ It is deliberately **not** called an outcome. `outcome` in this codebase is a de
 single-slot concept that weights confidence and writes an `outcome.recorded` journal entry; none
 of that applies to an attempt, and reusing the word would import those semantics by implication.
 
-Precedence: a declared `resultClass` decides. When it is absent, the legacy
-`/fail|regression|error/i` test over the free-text `result` still classifies, so **no stored
-attempt changes meaning**. The two are distinguishable by whether `resultClass` is present, and an
-inferred classification is never written back as though it were declared — a guess about prose is
-not a verified failure. This matters for results worded `"no error, but the cache stayed cold"`
-(a real failure the heuristic misses) and `"regression suite passed clean"` (a success the
-heuristic would wrongly claim).
+Whether an attempt failed has three answers (plan v1.4.4 PR-24): `failed`, `not_failed` and
+`undetermined`. Precedence: a declared `resultClass` decides. A captured attempt -- one carrying a
+`captureRef` or `outcomeEvidence`, which only capture writes -- with no class (absent or `null`) is
+`undetermined`: its prose is never read, it is in no collection (not even `reusableAttempts`: its
+reuse conditions are not evaluated), it is never implied to have succeeded, and `context()` counts
+it as `undetermined` on the failed collection's completeness entry. Every other attempt is
+classified as it always was: a legacy `null` class is not a failure, and with no class the legacy
+`/fail|regression|error/i` test over the free-text `result` decides, so **no stored attempt
+changes meaning**. `resultClass` keeps its three literals; `inconclusive` never stands for missing
+evidence.
+
+`resultClass` can therefore be absent for two reasons, and whether the attempt was captured tells
+them apart: with neither `captureRef` nor `outcomeEvidence`, the wording heuristic classifies the
+attempt; with either, the outcome is undetermined, and `outcomeEvidence.state` (`absent` or
+`not_applicable`) says why when it is recorded. An `observed` outcome carries the
+`resultClass` its exit status gave: 0 succeeded, any other integer failed. An inferred
+classification is never written back as though it were declared — a guess about prose is not a
+verified failure. This matters for results worded `"no error, but the cache stayed cold"` (a real
+failure the heuristic misses) and `"regression suite passed clean"` (a success the heuristic
+would wrongly claim).
 
 ## 10. Regression evidence
 
@@ -425,13 +443,20 @@ same — a verdict resting on facts that disagree is exactly the silent pass §5
 `reconsider({ project, decisionId })` narrows to one decision. Each of these is an **error**, never
 an empty result:
 
-- an unknown `decisionId` — `Decision not found`;
-- a `decisionId` belonging to another project — `Decision is not accessible in this project`;
+- an unknown `decisionId`, or one outside the request's scope — another project's, legacy data's,
+  another origin's, or any id when neither `project` nor `originId` is given — `Decision not found`,
+  the same answer for all of them, so it never says whether the id exists elsewhere;
 - a decision that is `archived`, `superseded` or `abandoned` — `not open for reconsideration`.
 
 An empty `unchanged` + `complete` for a mis-addressed decision would read exactly like "checked,
 and this decision is fine". A focused call evaluates only its decision, and therefore raises no
 review signal for any other.
+
+`review`, `reconsider` and `maintain` evaluate — and `maintain` ages and expires — only what the
+request's `project` (or, with none, its `originId`) owns. With neither they evaluate and change
+nothing: `review` returns `[]`, and `reconsider` and `maintain` carry
+`limitation: { code: 'scoped_coverage' }`; `reconsider` then reports `manual_review` with
+`evaluationCompleteness: 'partial'`, never an `unchanged` resting on nothing.
 
 ### What it does and does not write
 

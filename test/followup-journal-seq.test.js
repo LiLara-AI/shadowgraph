@@ -10,6 +10,7 @@ import { createShadowGraphServer } from '../src/server.js';
 import { getRuntimeCapabilities, NODE_SQLITE_NOT_APPLICABLE_REASON } from '../src/runtime-capabilities.js';
 import {
   INVALID_JOURNAL_SEQUENCE_CODE,
+  JOURNAL_SCHEMA_VERSION,
   JOURNAL_TYPE_ENTITY_KIND,
   NONCANONICAL_SCHEMA5_PURGE_ARTIFACT_CODE,
   REPLAYABLE_ENTRY_TYPES
@@ -18,6 +19,7 @@ import { createShadowGraph, rebuildProjection } from '../src/shadowgraph.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
 import { createJsonFileStore } from '../src/storage.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
+import { privilegedRebuild, privilegedSnapshot, privilegedValidate } from '../src/internal/snapshot.js';
 
 const NOW = '2026-08-28T12:00:00.000Z';
 const INVALID_SEQUENCE = /invalid_journal_sequence|journal\[1\]\.seq must be a positive safe integer/i;
@@ -96,14 +98,15 @@ const INVALID_ENTRY_SEQUENCES = Object.freeze([
   ['MAX_SAFE_INTEGER plus one', Number.MAX_SAFE_INTEGER + 1]
 ]);
 
+// Administrative historical seed; its fixed identity belongs to restore fixtures.
 function seededGraph() {
   const graph = createShadowGraph({ now: () => NOW });
-  graph.addDecision({
+  graph.importData({ records: [{ kind: 'decision',
     id: 'ds-p1-009-live',
     project: 'ds-p1-009-live',
     title: 'Must survive rejection',
     chosen: 'keep'
-  });
+   }] });
   return graph;
 }
 
@@ -113,22 +116,22 @@ test('DS-P1-009 schemas 1/2 reject every explicitly invalid journal entry sequen
       const payload = withJournalSequence(schemaVersion, seq);
 
       const imported = createShadowGraph({ now: () => NOW });
-      const importBefore = imported.exportData();
+      const importBefore = privilegedSnapshot(imported);
       assert.throws(
         () => imported.importData(payload),
         INVALID_SEQUENCE,
         `schema ${schemaVersion} ${label}: import diagnostic`
       );
-      assert.deepEqual(imported.exportData(), importBefore, `schema ${schemaVersion} ${label}: import is state-atomic`);
+      assert.deepEqual(privilegedSnapshot(imported), importBefore, `schema ${schemaVersion} ${label}: import is state-atomic`);
 
       const replaced = seededGraph();
-      const replaceBefore = replaced.exportData();
+      const replaceBefore = privilegedSnapshot(replaced);
       assert.throws(
         () => replaced.replaceData(payload),
         INVALID_SEQUENCE,
         `schema ${schemaVersion} ${label}: replacement diagnostic`
       );
-      assert.deepEqual(replaced.exportData(), replaceBefore, `schema ${schemaVersion} ${label}: replacement is state-atomic`);
+      assert.deepEqual(privilegedSnapshot(replaced), replaceBefore, `schema ${schemaVersion} ${label}: replacement is state-atomic`);
 
       assert.throws(
         () => validateRestorePayload(payload, { now: () => NOW }),
@@ -151,9 +154,9 @@ test('DS-P1-009 canonical schema 1/2 snapshots still migrate, validate, and rebu
   for (const schemaVersion of [1, 2]) {
     const graph = createShadowGraph({ now: () => NOW });
     assert.doesNotThrow(() => graph.importData(legacyPayload(schemaVersion)), `schema ${schemaVersion}: import`);
-    assert.equal(graph.validate().valid, true, `schema ${schemaVersion}: validation`);
-    assert.equal(graph.rebuild().rebuildable, true, `schema ${schemaVersion}: rebuild`);
-    assert.deepEqual(graph.rebuild().projection.records.map((record) => record.id), [`legacy-seq-${schemaVersion}`]);
+    assert.equal(privilegedValidate(graph).valid, true, `schema ${schemaVersion}: validation`);
+    assert.equal(privilegedRebuild(graph).rebuildable, true, `schema ${schemaVersion}: rebuild`);
+    assert.deepEqual(privilegedRebuild(graph).projection.records.map((record) => record.id), [`legacy-seq-${schemaVersion}`]);
   }
 });
 
@@ -175,14 +178,14 @@ test('DS-P1-009 schemas 1/2 reject unsafe envelope journalSeq and journalEpoch v
       for (const [label, value] of cases) {
         const payload = { ...legacyPayload(schemaVersion), [field]: value };
         const imported = createShadowGraph({ now: () => NOW });
-        const importBefore = imported.exportData();
+        const importBefore = privilegedSnapshot(imported);
         assert.throws(() => imported.importData(payload), diagnostic, `schema ${schemaVersion} ${field} ${label}: import`);
-        assert.deepEqual(imported.exportData(), importBefore, `schema ${schemaVersion} ${field} ${label}: import atomicity`);
+        assert.deepEqual(privilegedSnapshot(imported), importBefore, `schema ${schemaVersion} ${field} ${label}: import atomicity`);
 
         const replaced = seededGraph();
-        const replaceBefore = replaced.exportData();
+        const replaceBefore = privilegedSnapshot(replaced);
         assert.throws(() => replaced.replaceData(payload), diagnostic, `schema ${schemaVersion} ${field} ${label}: replacement`);
-        assert.deepEqual(replaced.exportData(), replaceBefore, `schema ${schemaVersion} ${field} ${label}: replacement atomicity`);
+        assert.deepEqual(privilegedSnapshot(replaced), replaceBefore, `schema ${schemaVersion} ${field} ${label}: replacement atomicity`);
         assert.throws(() => validateRestorePayload(payload, { now: () => NOW }), diagnostic, `schema ${schemaVersion} ${field} ${label}: restore validation`);
 
         if (field === 'journalEpoch') {
@@ -302,14 +305,14 @@ test('DS-P1-009 schemas 1/2 reject unsafe hard-gap ledger relations across impor
     for (const [label, ledger, markerSeq, diagnostic] of UNSAFE_GAP_RELATIONS) {
       const payload = legacyHardGapPayload(schemaVersion, ledger, markerSeq);
       const imported = createShadowGraph({ now: () => NOW });
-      const importBefore = imported.exportData();
+      const importBefore = privilegedSnapshot(imported);
       assert.throws(() => imported.importData(payload), diagnostic, `schema ${schemaVersion} ${label}: import`);
-      assert.deepEqual(imported.exportData(), importBefore, `schema ${schemaVersion} ${label}: import atomicity`);
+      assert.deepEqual(privilegedSnapshot(imported), importBefore, `schema ${schemaVersion} ${label}: import atomicity`);
 
       const replaced = seededGraph();
-      const replaceBefore = replaced.exportData();
+      const replaceBefore = privilegedSnapshot(replaced);
       assert.throws(() => replaced.replaceData(payload), diagnostic, `schema ${schemaVersion} ${label}: replacement`);
-      assert.deepEqual(replaced.exportData(), replaceBefore, `schema ${schemaVersion} ${label}: replacement atomicity`);
+      assert.deepEqual(privilegedSnapshot(replaced), replaceBefore, `schema ${schemaVersion} ${label}: replacement atomicity`);
       assert.throws(() => validateRestorePayload(payload, { now: () => NOW }), diagnostic, `schema ${schemaVersion} ${label}: restore validation`);
 
       const report = rebuildProjection(payload.journal, { journalEpoch: 1, sourceSchemaVersion: schemaVersion });
@@ -327,13 +330,13 @@ async function writeJson(path, payload) {
 
 function livePayload(id) {
   const graph = createShadowGraph({ now: () => NOW });
-  graph.addDecision({
+  graph.importData({ records: [{ kind: 'decision',
     id,
     project: 'ds-p1-009-live',
     title: 'Must survive rejected restore',
     chosen: 'keep'
-  });
-  return graph.exportData();
+   }] });
+  return privilegedSnapshot(graph);
 }
 
 async function seedJson(path, id) {
@@ -494,7 +497,7 @@ test('DS-P1-009 CLI, HTTP, and MCP restore reject schemas 1/2 atomically and res
       const beforeState = await seedJson(destination, `http-kept-${schemaVersion}`);
       const beforeBytes = await readFile(destination);
       const app = await createShadowGraphServer({ file: destination, now: () => NOW });
-      const liveBefore = app.graph.exportData();
+      const liveBefore = privilegedSnapshot(app.graph);
       app.server.listen(0, '127.0.0.1');
       await once(app.server, 'listening');
       try {
@@ -506,7 +509,7 @@ test('DS-P1-009 CLI, HTTP, and MCP restore reject schemas 1/2 atomically and res
         const body = await response.json();
         assert.equal(response.status, 400);
         assert.match(body.error, INVALID_SEQUENCE);
-        assert.deepEqual(app.graph.exportData(), liveBefore, 'HTTP rejection preserves live state');
+        assert.deepEqual(privilegedSnapshot(app.graph), liveBefore, 'HTTP rejection preserves live state');
         assert.deepEqual(await readFile(destination), beforeBytes, 'HTTP rejection preserves exact bytes');
       } finally {
         await closeServer(app.server);
@@ -572,18 +575,18 @@ test('DS-P1-009 canonical journal-less and hard-gap schema 1/2 data retains migr
     for (let restart = 0; restart < 3; restart += 1) {
       const graph = createShadowGraph({ now: () => NOW });
       assert.doesNotThrow(() => graph.importData(payload), `schema ${schemaVersion} restart ${restart}: import`);
-      assert.equal(graph.validate().valid, true, `schema ${schemaVersion} restart ${restart}: validation`);
-      assert.equal(graph.rebuild().rebuildable, true, `schema ${schemaVersion} restart ${restart}: rebuild`);
-      assert.deepEqual(graph.rebuild().projection.records.map((record) => record.id), [`journal-less-${schemaVersion}`]);
-      assert.equal(graph.exportData().journal.some((entry) => entry.type === 'legacy_metadata_event'), true);
-      assert.equal(graph.exportData().journal.some((entry) => entry.type === 'projection.baseline'), true);
-      payload = graph.exportData();
+      assert.equal(privilegedValidate(graph).valid, true, `schema ${schemaVersion} restart ${restart}: validation`);
+      assert.equal(privilegedRebuild(graph).rebuildable, true, `schema ${schemaVersion} restart ${restart}: rebuild`);
+      assert.deepEqual(privilegedRebuild(graph).projection.records.map((record) => record.id), [`journal-less-${schemaVersion}`]);
+      assert.equal(privilegedSnapshot(graph).journal.some((entry) => entry.type === 'legacy_metadata_event'), true);
+      assert.equal(privilegedSnapshot(graph).journal.some((entry) => entry.type === 'projection.baseline'), true);
+      payload = privilegedSnapshot(graph);
     }
 
     const hardGap = legacyHardGapPayload(schemaVersion);
     const hardGapGraph = createShadowGraph({ now: () => NOW });
     assert.doesNotThrow(() => hardGapGraph.importData(hardGap), `schema ${schemaVersion}: valid hard-gap import`);
-    assert.equal(hardGapGraph.validate().valid, true, `schema ${schemaVersion}: valid hard-gap validation`);
+    assert.equal(privilegedValidate(hardGapGraph).valid, true, `schema ${schemaVersion}: valid hard-gap validation`);
     assert.doesNotThrow(() => validateRestorePayload(hardGap, { now: () => NOW }), `schema ${schemaVersion}: valid hard-gap restore validation`);
   }
 });
@@ -601,9 +604,9 @@ test('DS-P1-009 canonical schema 1/2 data restores through JSON and migrates aft
     store.close();
     const restarted = createShadowGraph({ now: () => NOW });
     assert.doesNotThrow(() => restarted.importData(restoredPayload));
-    assert.equal(restarted.validate().valid, true);
-    assert.equal(restarted.rebuild().rebuildable, true);
-    assert.deepEqual(restarted.exportData().records.map((record) => record.id), [`journal-less-${schemaVersion}`]);
+    assert.equal(privilegedValidate(restarted).valid, true);
+    assert.equal(privilegedRebuild(restarted).rebuildable, true);
+    assert.deepEqual(privilegedSnapshot(restarted).records.map((record) => record.id), [`journal-less-${schemaVersion}`]);
   }
 });
 
@@ -624,9 +627,9 @@ test('DS-P1-009 canonical schema 1/2 data restores through SQLite and migrates a
     reopened.close();
     const restarted = createShadowGraph({ now: () => NOW });
     assert.doesNotThrow(() => restarted.importData(restoredPayload));
-    assert.equal(restarted.validate().valid, true);
-    assert.equal(restarted.rebuild().rebuildable, true);
-    assert.deepEqual(restarted.exportData().records.map((record) => record.id), [`journal-less-${schemaVersion}`]);
+    assert.equal(privilegedValidate(restarted).valid, true);
+    assert.equal(privilegedRebuild(restarted).rebuildable, true);
+    assert.deepEqual(privilegedSnapshot(restarted).records.map((record) => record.id), [`journal-less-${schemaVersion}`]);
   }
 });
 
@@ -815,7 +818,7 @@ function assertDuplicateSequenceRebuild(report, scenario, label) {
   assert.equal(report.skipped.filter((item) => item.why === DUPLICATE_SEQUENCE_CODE).length, 2, `${label}: neither colliding entry is folded`);
   assert.equal(report.applied, 0, `${label}: arbitrary same-sequence ordering is never applied`);
   assert.deepEqual(report.projection, {
-    schemaVersion: 5,
+    schemaVersion: JOURNAL_SCHEMA_VERSION,
     records: [],
     facts: [],
     relations: [],
@@ -833,14 +836,14 @@ test('DS-P1-010 every explicit positive-safe sequence is unique in schemas 1/2 b
         const payload = duplicateSequencePayload(schemaVersion, scenario, reversed);
 
         const imported = createShadowGraph({ now: () => NOW });
-        const importBefore = JSON.stringify(imported.exportData());
+        const importBefore = JSON.stringify(privilegedSnapshot(imported));
         assertDuplicateSequenceError(() => imported.importData(payload), `${label}: import`);
-        assert.equal(JSON.stringify(imported.exportData()), importBefore, `${label}: import preserves exact live serialization`);
+        assert.equal(JSON.stringify(privilegedSnapshot(imported)), importBefore, `${label}: import preserves exact live serialization`);
 
         const replaced = seededGraph();
-        const replaceBefore = JSON.stringify(replaced.exportData());
+        const replaceBefore = JSON.stringify(privilegedSnapshot(replaced));
         assertDuplicateSequenceError(() => replaced.replaceData(payload), `${label}: replace`);
-        assert.equal(JSON.stringify(replaced.exportData()), replaceBefore, `${label}: replace preserves exact live serialization`);
+        assert.equal(JSON.stringify(privilegedSnapshot(replaced)), replaceBefore, `${label}: replace preserves exact live serialization`);
 
         assertDuplicateSequenceError(
           () => validateRestorePayload(payload, { now: () => NOW }),
@@ -867,12 +870,12 @@ test('DS-P1-010 duplicate sequence diagnostic takes precedence over same journal
   for (const schemaVersion of [1, 2, 3, 4, 5]) {
     for (const reversed of [false, true]) {
       const graph = createShadowGraph({ now: () => NOW });
-      const before = JSON.stringify(graph.exportData());
+      const before = JSON.stringify(privilegedSnapshot(graph));
       assertDuplicateSequenceError(
         () => graph.importData(duplicateSequencePayload(schemaVersion, sameIdScenario, reversed)),
         `schema ${schemaVersion} same ids ${reversed ? 'reversed' : 'forward'}`
       );
-      assert.equal(JSON.stringify(graph.exportData()), before, `schema ${schemaVersion}: preflight is state-atomic`);
+      assert.equal(JSON.stringify(privilegedSnapshot(graph)), before, `schema ${schemaVersion}: preflight is state-atomic`);
     }
   }
 });
@@ -897,9 +900,9 @@ test('DS-P1-010 explicitly unnumbered legacy journal arrays remain preserved as 
     };
     const graph = createShadowGraph({ now: () => NOW });
     assert.doesNotThrow(() => graph.importData(payload), `schema ${schemaVersion}: unnumbered legacy import`);
-    assert.equal(graph.exportData().journal.length, 2, `schema ${schemaVersion}: both unnumbered entries preserved`);
-    assert.equal(graph.exportData().journal.every((entry) => entry.seq === undefined), true, `schema ${schemaVersion}: migration does not invent source order`);
-    const rebuild = graph.rebuild();
+    assert.equal(privilegedSnapshot(graph).journal.length, 2, `schema ${schemaVersion}: both unnumbered entries preserved`);
+    assert.equal(privilegedSnapshot(graph).journal.every((entry) => entry.seq === undefined), true, `schema ${schemaVersion}: migration does not invent source order`);
+    const rebuild = privilegedRebuild(graph);
     assert.equal(rebuild.legacy.filter((entry) => entry.why === 'metadata_only_no_seq').length, 2, `schema ${schemaVersion}: both entries declared legacy`);
     assert.deepEqual(rebuild.duplicates, [], `schema ${schemaVersion}: missing sequences are not duplicates`);
   }
@@ -1002,7 +1005,7 @@ test('DS-P1-010 CLI, HTTP, and MCP reject the schema 1/2 duplicate table with ex
       const beforeState = await seedJson(destination, `http-duplicate-kept-${schemaVersion}`);
       const beforeBytes = await readFile(destination);
       const app = await createShadowGraphServer({ file: destination, now: () => NOW });
-      const liveBefore = JSON.stringify(app.graph.exportData());
+      const liveBefore = JSON.stringify(privilegedSnapshot(app.graph));
       app.server.listen(0, '127.0.0.1');
       await once(app.server, 'listening');
       try {
@@ -1015,7 +1018,7 @@ test('DS-P1-010 CLI, HTTP, and MCP reject the schema 1/2 duplicate table with ex
           const body = await response.json();
           assert.equal(response.status, 400, `${scenario.label}: HTTP rejects`);
           assert.match(body.error, DUPLICATE_SEQUENCE, `${scenario.label}: HTTP stable diagnostic`);
-          assert.equal(JSON.stringify(app.graph.exportData()), liveBefore, `${scenario.label}: HTTP exact live serialization`);
+          assert.equal(JSON.stringify(privilegedSnapshot(app.graph)), liveBefore, `${scenario.label}: HTTP exact live serialization`);
           assert.deepEqual(await readFile(destination), beforeBytes, `${scenario.label}: HTTP exact durable bytes`);
         }
       } finally {
@@ -1189,7 +1192,7 @@ function collectMatrixFailure(failures, label, assertion) {
 
 test('DS-P1-011 every replayable type in schemas 1-5 requires a positive-safe sequence before import, replace, validation, or rebuild', () => {
   const failures = [];
-  const emptyProjection = { schemaVersion: 5, records: [], facts: [], relations: [], idempotency: [] };
+  const emptyProjection = { schemaVersion: JOURNAL_SCHEMA_VERSION, records: [], facts: [], relations: [], idempotency: [] };
   for (const schemaVersion of [1, 2, 3, 4, 5]) {
     for (const type of REPLAYABLE_ENTRY_TYPES) {
       for (const [variantLabel, variant] of ABSENT_SEQUENCE_VARIANTS) {
@@ -1197,14 +1200,14 @@ test('DS-P1-011 every replayable type in schemas 1-5 requires a positive-safe se
         const payload = replayableSequencePayload(schemaVersion, type, variant);
 
         const imported = createShadowGraph({ now: () => NOW });
-        const importBefore = JSON.stringify(imported.exportData());
+        const importBefore = JSON.stringify(privilegedSnapshot(imported));
         collectMatrixFailure(failures, `${label}: import diagnostic`, () => assertInvalidJournalSequence(() => imported.importData(payload), `${label}: import`));
-        collectMatrixFailure(failures, `${label}: import atomicity`, () => assert.equal(JSON.stringify(imported.exportData()), importBefore));
+        collectMatrixFailure(failures, `${label}: import atomicity`, () => assert.equal(JSON.stringify(privilegedSnapshot(imported)), importBefore));
 
         const replaced = seededGraph();
-        const replaceBefore = JSON.stringify(replaced.exportData());
+        const replaceBefore = JSON.stringify(privilegedSnapshot(replaced));
         collectMatrixFailure(failures, `${label}: replace diagnostic`, () => assertInvalidJournalSequence(() => replaced.replaceData(payload), `${label}: replace`));
-        collectMatrixFailure(failures, `${label}: replace atomicity`, () => assert.equal(JSON.stringify(replaced.exportData()), replaceBefore));
+        collectMatrixFailure(failures, `${label}: replace atomicity`, () => assert.equal(JSON.stringify(privilegedSnapshot(replaced)), replaceBefore));
 
         collectMatrixFailure(failures, `${label}: restore validation`, () => {
           assertInvalidJournalSequence(() => validateRestorePayload(payload, { now: () => NOW }), `${label}: restore validation`);
@@ -1257,10 +1260,10 @@ test('DS-P2-011 unsafe schema-5 purge marker sequences diagnose invalid_journal_
   for (const [label, variant] of variants) {
     const payload = replayableSequencePayload(5, 'project.purged', variant);
     const graph = seededGraph();
-    const before = JSON.stringify(graph.exportData());
+    const before = JSON.stringify(privilegedSnapshot(graph));
     const error = assertInvalidJournalSequence(() => graph.replaceData(payload), `schema 5 purge ${label}`);
     assert.equal(error.message.includes('noncanonical_schema5_purge_artifact'), false, `${label}: no competing purge diagnosis`);
-    assert.equal(JSON.stringify(graph.exportData()), before, `${label}: replacement is atomic`);
+    assert.equal(JSON.stringify(privilegedSnapshot(graph)), before, `${label}: replacement is atomic`);
 
     const report = rebuildProjection(payload.journal, { sourceSchemaVersion: 5 });
     assert.equal(report.rebuildable, false, `${label}: pure rebuild rejects`);
@@ -1339,10 +1342,10 @@ test('DS-P1-011 only true legacy unnumbered metadata remains compatible and is d
   for (const schemaVersion of [1, 2]) {
     const graph = createShadowGraph({ now: () => NOW });
     assert.doesNotThrow(() => graph.importData(rawLegacyMetadataPayload(schemaVersion)));
-    const validation = graph.validate();
+    const validation = privilegedValidate(graph);
     assert.equal(validation.valid, true, `schema ${schemaVersion}: legacy metadata remains readable`);
     assert.equal(validation.issues.filter((issue) => issue.code === 'legacy_metadata_without_sequence').length, 2);
-    const rebuild = graph.rebuild();
+    const rebuild = privilegedRebuild(graph);
     assert.equal(rebuild.rebuildable, true, `schema ${schemaVersion}: metadata does not claim projection mutations`);
     assert.equal(rebuild.applied, 0);
     assert.equal(rebuild.legacy.filter((entry) => entry.why === 'metadata_only_no_seq').length, 2);
@@ -1354,10 +1357,10 @@ test('DS-P1-011 only true legacy unnumbered metadata remains compatible and is d
       () => graph.importData(explicitLegacyMetadataPayload(schemaVersion, (entry) => { delete entry.seq; })),
       `schema ${schemaVersion}: explicit non-replayable metadata import`
     );
-    const validation = graph.validate();
+    const validation = privilegedValidate(graph);
     assert.equal(validation.valid, true, `schema ${schemaVersion}: explicit legacy metadata validates`);
     assert.equal(validation.issues.some((issue) => issue.code === 'legacy_metadata_without_sequence'), true);
-    const rebuild = graph.rebuild();
+    const rebuild = privilegedRebuild(graph);
     assert.equal(rebuild.rebuildable, true);
     assert.equal(rebuild.applied, 0);
     assert.equal(rebuild.legacy[0].why, 'metadata_only_no_seq');
@@ -1457,7 +1460,7 @@ test('DS-P1-011 CLI, HTTP, and MCP reject seq-less replay and unsafe schema-5 pu
     const beforeState = await seedJson(destination, 'http-sequence-order-kept');
     const beforeBytes = await readFile(destination);
     const app = await createShadowGraphServer({ file: destination, now: () => NOW });
-    const liveBefore = JSON.stringify(app.graph.exportData());
+    const liveBefore = JSON.stringify(privilegedSnapshot(app.graph));
     app.server.listen(0, '127.0.0.1');
     await once(app.server, 'listening');
     try {
@@ -1470,7 +1473,7 @@ test('DS-P1-011 CLI, HTTP, and MCP reject seq-less replay and unsafe schema-5 pu
         const body = await response.json();
         assert.equal(response.status, 400, `${label}: HTTP rejects`);
         assert.match(body.error, /invalid_journal_sequence/i, `${label}: HTTP primary diagnostic`);
-        assert.equal(JSON.stringify(app.graph.exportData()), liveBefore, `${label}: HTTP live atomicity`);
+        assert.equal(JSON.stringify(privilegedSnapshot(app.graph)), liveBefore, `${label}: HTTP live atomicity`);
         assert.deepEqual(await readFile(destination), beforeBytes, `${label}: HTTP durable atomicity`);
       }
     } finally {

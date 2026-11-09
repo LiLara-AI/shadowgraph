@@ -56,7 +56,7 @@ A memory identity is the exact tuple:
 (project, userId, agentId, runId, memoryType, key)
 ```
 
-This exactness prevents a run-specific memory from leaking into a broader user-only read. A supplied project must be a non-empty string on every write and filtered read path. Scope must be an object containing only string/null `userId`, `agentId`, and `runId`; unknown keys and malformed selectors are rejected rather than collapsed to all-null. For memory records, omitted project/scope means the `default` project and explicit all-null scope across recall, search, retrieval, and graph traversal; it never means “all projects/users.” Shared decisions/facts retain their documented project-query behavior, while another project/user's scoped memory never rides along.
+This exactness prevents a run-specific memory from leaking into a broader user-only read. A supplied project must be a non-empty string on every write and filtered read path. Scope must be an object containing only string/null `userId`, `agentId`, and `runId`; unknown keys and malformed selectors are rejected rather than collapsed to all-null. For memory records, an omitted scope means the explicit all-null scope across recall, search, retrieval, and graph traversal; it never means “all users.” An omitted project reads no project at all -- never every project and never `default` -- for memories and for decisions, facts and attempts alike, so another project's records, and another user's scoped memory, never ride along.
 
 ## Reconciliation
 
@@ -212,7 +212,7 @@ Markdown `pull` writes `sourceClass: tool_observed` and `client: markdown-sync`.
 
 HTTP accepts caller-supplied vectors but does not make network calls to an embedding provider.
 
-CLI, HTTP, MCP tools, and the MCP context resource persist review signals created by `context()`. HTTP and MCP mutators reload the last readable durable snapshot after an ordinary save failure (or restore the pre-mutation snapshot when storage is unreadable), so an unpersisted mutation cannot remain live and be committed by a later request.
+CLI, HTTP and MCP persist review signals created by `reviewContext()` (`review-context`, `POST /review-context`, `shadowgraph_review_context`); `context()` and the MCP context resource are reads and persist nothing. HTTP and MCP mutators reload the last readable durable snapshot after an ordinary save failure (or restore the pre-mutation snapshot when storage is unreadable), so an unpersisted mutation cannot remain live and be committed by a later request.
 
 ### MCP
 
@@ -244,7 +244,7 @@ Logical and hard project purge cover memory records, current-memory indexes, ide
 - Unicode Markdown push/pull and conflict refusal;
 - logical purge non-resurrection;
 - JSON/SQLite restart parity, journal rebuild, and journal-bearing schema-3 restore migration;
-- CLI, HTTP, full MCP, and compact MCP workflows, context-signal persistence, and ordinary-save rollback.
+- CLI, HTTP, full MCP, and compact MCP workflows, context as a read, review-context signal persistence, and ordinary-save rollback.
 
 ### Not measured
 

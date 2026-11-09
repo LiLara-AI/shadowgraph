@@ -50,11 +50,12 @@ export function measureTools(tools) {
   return measured;
 }
 
-// Both advertised modes for one server configuration.
+// Advertised modes for one server configuration.
 export function measureModes(options = {}) {
   const catalog = buildToolCatalog(options);
   return {
     full: measureTools(selectTools(catalog)),
+    workflow: measureTools(selectTools(catalog, { profile: 'workflow' })),
     compact: measureTools(selectTools(catalog, { compact: true }))
   };
 }

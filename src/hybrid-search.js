@@ -8,6 +8,26 @@ const SIGNALS = Object.freeze(['lexical', 'semantic', 'graph', 'temporal']);
 const DEFAULT_WEIGHTS = Object.freeze({ lexical: 1, semantic: 1, graph: 0.8, temporal: 0.4 });
 const RRF_K = 60;
 
+// English function words: the common stop-word list, the modals and other
+// closed-class words it leaves out, and the pieces a contraction or "e.g."
+// splits into. They say nothing of a subject, so where relevance is decided --
+// the default read's relevant block, which host delivery reads at every prompt
+// -- a record that shares only these with a query is not relevant to it
+// (`lexicalContent`). Ranking itself still uses every term. An acronym that folds
+// to one of them ("IT", "US") is dropped with it; other languages' function
+// words are not listed.
+const FUNCTION_WORDS = new Set(`a about above across after again against all along already also although am among amongst an and
+another any anybody anyone anything are around as at be because been before behind being below beside besides between beyond
+both but by can cannot could despite did do does doing don down during e each eg either else etc even ever every everybody
+everyone everything except few for from further g had has have having he hence her here hers herself him himself his how
+however i ie if in inside into is it its itself just least less let many may me might more most much must my myself neither
+no nobody none nor not nothing now of off on once only onto or other ought our ours ourselves out outside over own per quite
+rather same several shall she should since so some somebody someone something still such than that the their theirs them
+themselves then there therefore these they this those though through thus to too toward towards under unless until up upon us
+very via was we were what whatever when whenever where whereas wherever whether which whichever while who whoever whom whose
+why will with within without would yet you your yours yourself yourselves s t d ll m o re ve y ma ain aren couldn didn doesn
+hadn hasn haven isn mightn mustn needn shan shouldn wasn weren won wouldn`.split(/\s+/u));
+
 // Arabic orthographic folds. These are separate letters, not combining marks, so
 // no Unicode normalisation form unifies them.
 //
@@ -58,6 +78,120 @@ export function foldText(value) {
     .toLocaleLowerCase();
 }
 
+const ARABIC_CHAR_RE = /[\u0600-\u06FF]/u;
+const ARABIC_PREFIXES = ['وال', 'فال', 'بال', 'كال', 'لل', 'ال'];
+const ARABIC_SUFFIXES = ['ات', 'ون', 'ين', 'ان', 'ها', 'هم', 'هن', 'كم', 'نا', 'يه', 'يا', 'ه', 'ي'];
+
+export function stemArabicToken(token) {
+  const folded = foldText(token).trim();
+  if (!folded || !ARABIC_CHAR_RE.test(folded)) return folded ? [folded] : [];
+  const variants = new Set([folded]);
+  let current = folded;
+  for (const prefix of ARABIC_PREFIXES) {
+    if (current.startsWith(prefix) && current.length - prefix.length >= 3) {
+      current = current.slice(prefix.length);
+      variants.add(current);
+      break;
+    }
+  }
+  for (const base of [...variants]) {
+    for (const suffix of ARABIC_SUFFIXES) {
+      if (base.endsWith(suffix) && base.length - suffix.length >= 3) {
+        variants.add(base.slice(0, -suffix.length));
+      }
+    }
+  }
+  return [...variants];
+}
+
+const BILINGUAL_SYNONYM_GROUPS = [
+  ['cache', 'caching', 'كاش', 'مؤقت'],
+  ['storage', 'store', 'تخزين', 'حفظ'],
+  ['local', 'locally', 'offline', 'محلي', 'محليا', 'اتصال'],
+  ['cloud', 'سحابي', 'سحابيه', 'سحابه'],
+  ['database', 'db', 'datastore', 'قاعده', 'بيانات', 'داتابيز'],
+  ['decision', 'decisions', 'قرار', 'قرارات'],
+  ['memory', 'memories', 'ذاكره', 'ذواكر'],
+  ['attempt', 'attempts', 'tried', 'محاوله', 'محاولات', 'تجربه'],
+  ['failed', 'failure', 'error', 'فشل', 'فاشله', 'خطا', 'اخفاق'],
+  ['succeeded', 'success', 'worked', 'نجاح', 'ناجح', 'نجحت'],
+  ['retry', 'retries', 'اعاده', 'تكرار'],
+  ['timeout', 'timeouts', 'مهله', 'انتهاء'],
+  ['latency', 'delay', 'تاخير', 'بطء', 'زمن', 'استجابه'],
+  ['queue', 'background', 'طابور', 'رتل', 'خلفيه'],
+  ['auth', 'authentication', 'login', 'مصادقه', 'توثيق', 'دخول'],
+  ['token', 'jwt', 'رمز', 'توكن'],
+  ['session', 'sessions', 'جلسه', 'جلسات'],
+  ['api', 'endpoint', 'واجهه', 'نقطه'],
+  ['rate', 'limit', 'throttle', 'معدل', 'حد', 'تقييد'],
+  ['privacy', 'private', 'خصوصيه', 'خاص'],
+  ['search', 'query', 'بحث', 'استعلام'],
+  ['config', 'configuration', 'settings', 'اعداد', 'اعدادات', 'ضبط'],
+  ['review', 'audit', 'مراجعه', 'تدقيق'],
+  ['library', 'package', 'مكتبه', 'حزمه'],
+  ['user', 'preference', 'preferences', 'مستخدم', 'تفضيل', 'تفضيلات'],
+  ['project', 'projects', 'مشروع', 'مشاريع']
+];
+
+export const BILINGUAL_SYNONYMS = (() => {
+  const map = new Map();
+  for (const group of BILINGUAL_SYNONYM_GROUPS) {
+    const expandedGroup = new Set();
+    for (const item of group) {
+      for (const stem of stemArabicToken(item)) expandedGroup.add(stem);
+    }
+    const all = [...expandedGroup];
+    for (const token of all) {
+      const existing = map.get(token) ?? new Set();
+      for (const peer of all) {
+        if (peer !== token) existing.add(peer);
+      }
+      map.set(token, existing);
+    }
+  }
+  return map;
+})();
+
+export function expandSearchTokens(token, { includeSynonyms = true } = {}) {
+  const tokens = Array.isArray(token) ? token : [token];
+  const expanded = new Set();
+  for (const item of tokens) {
+    const stems = stemArabicToken(item);
+    for (const stem of stems) {
+      expanded.add(stem);
+      if (includeSynonyms) {
+        const peers = BILINGUAL_SYNONYMS.get(stem);
+        if (peers) {
+          for (const peer of peers) expanded.add(peer);
+        }
+      }
+    }
+  }
+  return [...expanded];
+}
+
+const STOPWORDS = new Set([
+  'the', 'and', 'for', 'with', 'from', 'that', 'this', 'into', 'over', 'under',
+  'when', 'where', 'what', 'why', 'how', 'was', 'were', 'are', 'not', 'use', 'using',
+  'في', 'من', 'علي', 'الي', 'عن', 'مع', 'هذا', 'هذه', 'التي', 'الذي', 'كان', 'كانت', 'بدون', 'دون'
+]);
+
+export function extractKeywords(text, maxTags = 8) {
+  const rawTokens = String(text ?? '').normalize('NFC').toLocaleLowerCase().match(/[\p{L}\p{N}\p{M}_-]+/gu) ?? [];
+  const seen = new Set();
+  const result = [];
+  for (const rawToken of rawTokens) {
+    const folded = foldText(rawToken);
+    if (folded.length < 3 || STOPWORDS.has(folded)) continue;
+    const canonical = stemArabicToken(folded)[0] ?? folded;
+    if (seen.has(canonical)) continue;
+    seen.add(canonical);
+    result.push(rawToken);
+    if (result.length >= maxTags) break;
+  }
+  return result;
+}
+
 function tokenize(value) {
   return foldText(value).match(/[\p{L}\p{N}]+/gu) ?? [];
 }
@@ -71,16 +205,20 @@ function primitives(value, output = []) {
 }
 
 function searchableText(record) {
-  if (record.kind === 'memory') return [record.key, record.text, ...(record.tags ?? []), ...primitives(record.metadata)].join(' ');
-  if (record.kind === 'fact') return [record.key, ...primitives(record.value)].join(' ');
+  if (record.kind === 'memory') return [record.key, record.text, record.changeSummary, ...(record.tags ?? []), ...primitives(record.metadata)].join(' ');
+  if (record.kind === 'fact') return [record.key, record.changeSummary, ...(record.tags ?? []), ...primitives(record.value)].join(' ');
   if (record.kind === 'decision') {
+    const lessons = Array.isArray(record.outcome?.lessons) ? record.outcome.lessons : (record.outcome?.lessons ? [record.outcome.lessons] : []);
     return [
-      record.title, record.goal, record.chosen, ...(record.assumptions ?? []),
+      record.title, record.goal, record.chosen, record.changeSummary,
+      ...(record.tags ?? []),
+      ...(record.assumptions ?? []),
       ...(record.evidence ?? []).flatMap((item) => [item?.source, item?.detail]),
-      ...(record.alternatives ?? []).flatMap((item) => [item?.label, item?.reasonRejected])
+      ...(record.alternatives ?? []).flatMap((item) => [item?.label, item?.reasonRejected]),
+      record.outcome?.summary, ...lessons
     ].join(' ');
   }
-  if (record.kind === 'attempt') return [record.solution, record.result, record.reason, record.environment].join(' ');
+  if (record.kind === 'attempt') return [record.task, record.solution, record.result, record.reason, record.environment, ...(record.tags ?? [])].join(' ');
   return '';
 }
 
@@ -124,51 +262,102 @@ function validAt(record, asOf) {
 }
 
 function visible(record, options) {
-  if (options.project && record.project !== options.project) return false;
+  if (options.project && record.project !== options.project) {
+    if (!options.includeCrossProject || record.visibility === 'project') return false;
+  }
   if (record.kind === 'memory') {
+    if (options.project && record.project !== options.project) {
+      if (record.visibility !== 'global' && !['preference', 'instruction', 'profile', 'procedure'].includes(record.memoryType)) return false;
+    }
     // Omitted scope means the explicit project-wide (all-null) scope. Never let a
     // transport that forgot user/agent/run identity turn that omission into an
     // all-scopes read.
     if (!sameScope(record.scope, options.scope ?? {})) return false;
     if (options.memoryType && record.memoryType !== options.memoryType) return false;
+    if (options.includeHistory === true) return record.status !== 'invalidated';
     const pointInTime = options.asOf ?? options.currentAt ?? null;
     return pointInTime ? validAt(record, pointInTime) : record.status === 'active';
   }
   if (record.kind === 'fact') {
+    if (options.project && record.project !== options.project && record.visibility !== 'global') return false;
+    if (options.includeHistory === true) return true;
     const pointInTime = options.asOf ?? options.currentAt ?? null;
     return pointInTime ? validAt(record, pointInTime) : record.status === 'active';
   }
+  if (record.kind === 'decision' && options.excludeSupersededDecisions && !options.includeHistory && !options.asOf && record.status === 'superseded') return false;
   if (options.kind && record.kind !== options.kind) return false;
   return true;
 }
 
-function lexicalRanking(candidates, query) {
+// BM25 over every query term; `contentMatched` also names the records that
+// share at least one content word (not a function word) with the query.
+function lexicalRanking(candidates, query, { expandSynonyms = false } = {}) {
   const queryTerms = [...new Set(tokenize(query))];
-  if (!queryTerms.length) return { list: [], raw: new Map(), terms: [] };
-  const documents = candidates.map((record) => ({ record, tokens: tokenize(searchableText(record)) }));
+  const contentTerms = queryTerms.filter((term) => !FUNCTION_WORDS.has(term));
+  const contentMatched = new Set();
+  if (!queryTerms.length) return { list: [], raw: new Map(), terms: [], contentTerms, contentMatched };
+  if (!expandSynonyms) {
+    const documents = candidates.map((record) => ({ record, tokens: tokenize(searchableText(record)) }));
+    const averageLength = documents.reduce((sum, item) => sum + item.tokens.length, 0) / Math.max(documents.length, 1);
+    const raw = new Map();
+    const k1 = 1.2;
+    const b = 0.75;
+    for (const term of queryTerms) {
+      const documentFrequency = documents.filter((item) => item.tokens.includes(term)).length;
+      if (!documentFrequency) continue;
+      const idf = Math.log(1 + ((documents.length - documentFrequency + 0.5) / (documentFrequency + 0.5)));
+      for (const item of documents) {
+        const frequency = item.tokens.filter((token) => token === term).length;
+        if (!frequency) continue;
+        const normalization = frequency + k1 * (1 - b + b * (item.tokens.length / Math.max(averageLength, 1)));
+        raw.set(item.record.id, (raw.get(item.record.id) ?? 0) + idf * ((frequency * (k1 + 1)) / normalization));
+        if (!FUNCTION_WORDS.has(term)) contentMatched.add(item.record.id);
+      }
+    }
+    const list = [...raw.entries()].sort((left, right) => right[1] - left[1] || String(left[0]).localeCompare(String(right[0]))).map(([id]) => id);
+    return { list, raw, terms: queryTerms, contentTerms, contentMatched };
+  }
+  const documents = candidates.map((record) => {
+    const baseTokens = tokenize(searchableText(record));
+    const expandedSet = new Set();
+    for (const token of baseTokens) {
+      for (const variant of expandSearchTokens(token, { includeSynonyms: false })) expandedSet.add(variant);
+    }
+    return { record, tokens: baseTokens, expandedSet };
+  });
   const averageLength = documents.reduce((sum, item) => sum + item.tokens.length, 0) / Math.max(documents.length, 1);
   const raw = new Map();
   const k1 = 1.2;
   const b = 0.75;
   for (const term of queryTerms) {
-    const documentFrequency = documents.filter((item) => item.tokens.includes(term)).length;
+    const termVariants = expandSearchTokens(term, { includeSynonyms: true });
+    const matchingDocs = documents.filter((item) => termVariants.some((v) => item.expandedSet.has(v)));
+    const documentFrequency = matchingDocs.length;
     if (!documentFrequency) continue;
     const idf = Math.log(1 + ((documents.length - documentFrequency + 0.5) / (documentFrequency + 0.5)));
-    for (const item of documents) {
-      const frequency = item.tokens.filter((token) => token === term).length;
-      if (!frequency) continue;
+    for (const item of matchingDocs) {
+      const directFreq = item.tokens.filter((token) => token === term).length;
+      const stemVariants = expandSearchTokens(term, { includeSynonyms: false });
+      const stemFreq = directFreq || item.tokens.filter((token) => stemVariants.some((v) => expandSearchTokens(token, { includeSynonyms: false }).includes(v))).length;
+      const frequency = stemFreq > 0 ? stemFreq : 0.6;
       const normalization = frequency + k1 * (1 - b + b * (item.tokens.length / Math.max(averageLength, 1)));
       raw.set(item.record.id, (raw.get(item.record.id) ?? 0) + idf * ((frequency * (k1 + 1)) / normalization));
+      if (!FUNCTION_WORDS.has(term)) contentMatched.add(item.record.id);
     }
   }
   const list = [...raw.entries()].sort((left, right) => right[1] - left[1] || String(left[0]).localeCompare(String(right[0]))).map(([id]) => id);
-  return { list, raw, terms: queryTerms };
+  return { list, raw, terms: queryTerms, contentTerms, contentMatched };
 }
 
 function vectorValues(value) {
   const values = Array.isArray(value) ? value : value?.values;
   if (!Array.isArray(values) || values.length === 0 || values.some((item) => typeof item !== 'number' || !Number.isFinite(item))) return null;
   return values;
+}
+
+function carriesVector(value) {
+  const values = Array.isArray(value) ? value : value?.values;
+  return Array.isArray(values) && values.length > 0;
 }
 
 function embeddingDescriptor(value) {
@@ -250,10 +439,79 @@ function ranks(list) {
   return new Map(list.map((id, index) => [id, index + 1]));
 }
 
+function buildHistoryChain(record, allRecordsById, allRecords) {
+  const chainIds = new Set([record.id]);
+  if (record.kind === 'memory' || record.kind === 'fact') {
+    for (const candidate of allRecords) {
+      if (candidate.kind === record.kind && candidate.project === record.project && candidate.key === record.key) {
+        if (record.kind !== 'memory' || sameScope(candidate.scope, record.scope)) chainIds.add(candidate.id);
+      }
+    }
+  }
+  const queue = [record];
+  while (queue.length > 0) {
+    const cursor = queue.shift();
+    if (!cursor) continue;
+    const prevIds = Array.isArray(cursor.supersedes)
+      ? cursor.supersedes
+      : [cursor.supersedes, cursor.supersedesId, cursor.temporal?.supersedesId].filter((x) => typeof x === 'string' && x);
+    for (const prevId of prevIds) {
+      if (prevId && !chainIds.has(prevId)) {
+        chainIds.add(prevId);
+        const prevRec = allRecordsById.get(prevId);
+        if (prevRec) queue.push(prevRec);
+      }
+    }
+    const nextId = cursor.supersededBy ?? cursor.temporal?.supersededBy ?? null;
+    if (nextId && !chainIds.has(nextId)) {
+      chainIds.add(nextId);
+      const nextRec = allRecordsById.get(nextId);
+      if (nextRec) queue.push(nextRec);
+    }
+  }
+  return [...chainIds]
+    .map((id) => allRecordsById.get(id))
+    .filter(Boolean)
+    .sort((a, b) => {
+      if (a.supersededBy === b.id || (Array.isArray(b.supersedes) && b.supersedes.includes(a.id)) || b.supersedes === a.id) return -1;
+      if (b.supersededBy === a.id || (Array.isArray(a.supersedes) && a.supersedes.includes(b.id)) || a.supersedes === b.id) return 1;
+      const ta = Date.parse(temporalOf(a)?.validFrom ?? a.createdAt ?? a.observedAt ?? 0) || 0;
+      const tb = Date.parse(temporalOf(b)?.validFrom ?? b.createdAt ?? b.observedAt ?? 0) || 0;
+      return ta - tb || (a.version ?? 0) - (b.version ?? 0) || String(a.id).localeCompare(String(b.id));
+    })
+    .map((entry) => ({
+      id: entry.id,
+      kind: entry.kind,
+      status: entry.status ?? 'active',
+      validFrom: temporalOf(entry)?.validFrom ?? entry.createdAt ?? entry.observedAt ?? null,
+      validTo: temporalOf(entry)?.validTo ?? null,
+      summary: entry.kind === 'decision'
+        ? `${entry.title}: ${entry.chosen}`
+        : entry.kind === 'memory'
+          ? `${entry.key}: ${entry.text}`
+          : entry.kind === 'fact'
+            ? `${entry.key}: ${JSON.stringify(entry.value)}`
+            : entry.solution ?? entry.id,
+      changeSummary: entry.changeSummary ?? null
+    }));
+}
+
 export function hybridSearch(snapshot, query = '', options = {}) {
-  const records = [...(snapshot.records ?? []), ...(snapshot.facts ?? [])].filter((record) => visible(record, options));
+  // A legacy fact may be stored with no kind. What the caller hands over as a
+  // fact is matched, and gated by validity, as the fact it is, and returned as
+  // it was stored.
+  const stored = new Map();
+  const facts = (snapshot.facts ?? []).map((fact) => {
+    if (fact.kind != null) return fact;
+    const ranked = { ...fact, kind: 'fact' };
+    stored.set(ranked, fact);
+    return ranked;
+  });
+  const allPool = [...(snapshot.records ?? []), ...facts];
+  const allPoolById = new Map(allPool.map((record) => [record.id, record]));
+  const records = allPool.filter((record) => visible(record, options));
   const byId = new Map(records.map((record) => [record.id, record]));
-  const lexical = lexicalRanking(records, query);
+  const lexical = lexicalRanking(records, query, options);
   const semantic = semanticRanking(records, options.queryEmbedding);
   const graph = graphRanking(records, snapshot.relations ?? [], options.focalId, options.asOf ?? options.currentAt, options.graphDepth ?? 3);
   const temporal = temporalRanking(records, Boolean(options.asOf || options.preferRecent));
@@ -283,17 +541,26 @@ export function hybridSearch(snapshot, query = '', options = {}) {
         reasons.push(`${name} rank ${rank}`);
       }
     }
-    return { record, score, ranks: hitRanks, scores: rawScores, reasons };
+    const baseItem = { record: stored.get(record) ?? record, score, ranks: hitRanks, scores: rawScores, reasons };
+    if (options.includeHistory && record) {
+      baseItem.historyChain = buildHistoryChain(record, allPoolById, allPool);
+    }
+    return baseItem;
   }).filter((item) => item.record).sort((left, right) => right.score - left.score || String(left.record.id).localeCompare(String(right.record.id)));
 
   return {
     items,
     signals: {
       lexical: { available: lexical.terms.length > 0, matched: lexical.list.length, terms: lexical.terms },
-      semantic: { available: semantic.available, matched: semantic.list.length, reason: semantic.reason },
+      // How many candidates carry a stored vector, query vector or not (EVG-10);
+      // presence only, so no vector is read on a path that does not rank by one.
+      semantic: { available: semantic.available, matched: semantic.list.length, indexed: records.filter((record) => carriesVector(record.embedding)).length, reason: semantic.reason },
       graph: { available: graph.available, matched: graph.list.length, reason: graph.reason },
       temporal: { available: temporal.available, matched: temporal.list.length, reason: temporal.reason, asOf: options.asOf ?? null }
     },
-    ranking: { strategy: 'weighted_rrf', k: RRF_K, weights }
+    ranking: { strategy: 'weighted_rrf', k: RRF_K, weights },
+    // Where relevance is decided: the query's content words and the records one
+    // of them matched (recall() passes on items, signals and ranking only).
+    lexicalContent: { terms: lexical.contentTerms, matched: lexical.contentMatched }
   };
 }

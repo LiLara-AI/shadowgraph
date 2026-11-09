@@ -1,0 +1,495 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
+import { readFile, writeFile, mkdir, utimes } from 'node:fs/promises';
+import { join } from 'node:path';
+import { scratchDirectory } from '../tools/scratch-directory.js';
+import { FROZEN_WORKER_BUDGETS } from '../src/internal/extraction-budget.js';
+import { createDestinationFence, fenceLockPath } from '../src/revision-store.js';
+const state = () => import('../src/internal/extraction-state.js');
+const activation = () => import('../src/activation.js');
+async function setup(t) {
+  const root = await scratchDirectory(t), env = { SHADOWGRAPH_HOME: root };
+  const runtime = { path: join(root, 'shadowgraph-runtime'), commit: 'a'.repeat(40), extraction: true };
+  const store = { file: join(root, 'memory.json'), storage: 'json' };
+  const extraction = { state: 'active', activationId: randomUUID(), changedAt: new Date().toISOString(), store, runtime,
+    noOverageConfirmed: true, budgets: { ...FROZEN_WORKER_BUDGETS }, model: 'claude-opus-5[1m]',
+    executor: { ok: true, executable: join(root, 'claude.exe'), binarySha256: 'b'.repeat(64), hostVersion: '2.1.288', model: 'claude-opus-5[1m]', restrictions: Object.fromEntries(Array.from({ length: 10 }, (_, i) => [`E-${i + 1}`, true])), accountFingerprint: 'f'.repeat(64), accountSalt: 'e'.repeat(32) } };
+  const record = { version: 1, capabilities: { extraction, capture: { state: 'active', store, runtime } }, history: [] };
+  const file = join(root, 'activation.json'); const save = () => writeFile(file, JSON.stringify(record)); await save();
+  return { root, env, extraction, record, file, save };
+}
+test('extraction activation reader requires frozen budgets, exact shared runtime/store, confirmation and executor receipt', async t => {
+  const f = await setup(t), { activeExtraction } = await state();
+  assert.deepEqual(await activeExtraction(f.env), f.extraction);
+  for (const change of [e => { e.noOverageConfirmed = false; }, e => { e.activationId = ''; }, e => { e.budgets.calls++; }, e => { e.executor.restrictions['E-7'] = false; }, e => { e.executor.executable = 'claude'; }, e => { e.runtime.extraction = false; }, e => { e.model = 'another'; }]) {
+    const copy = structuredClone(f.record); change(copy.capabilities.extraction); await writeFile(f.file, JSON.stringify(copy));
+    assert.equal(await activeExtraction(f.env), null);
+  }
+  for (const field of ['runtime', 'store']) {
+    const copy = structuredClone(f.record); copy.capabilities.capture[field] = field === 'runtime' ? { ...f.extraction.runtime, commit: 'c'.repeat(40) } : { ...f.extraction.store, file: join(f.root, 'other') };
+    await writeFile(f.file, JSON.stringify(copy)); assert.equal(await activeExtraction(f.env), null);
+  }
+  await writeFile(f.file, '{broken'); assert.equal(await activeExtraction(f.env), null);
+});
+test('extraction deactivation persists inert state before waiting and reports a still-running worker as deferred', async t => {
+  const f = await setup(t), { workerFenceFile, activeExtraction } = await state();
+  const { deactivateExtraction } = await activation(); let release, ready;
+  const entered = new Promise(r => { ready = r; });
+  const worker = createDestinationFence(workerFenceFile(f.env)).run(() => new Promise(r => { release = r; ready(); }));
+  await entered;
+  try {
+    const out = await deactivateExtraction({ env: f.env, cleanupTimeoutMs: 25 });
+    assert.equal(out.state, 'deactivated'); assert.equal(out.cleanup.status, 'deferred');
+    assert.equal(await activeExtraction(f.env), null);
+    assert.equal(JSON.parse(await readFile(f.file)).capabilities.extraction.state, 'deactivated');
+  } finally { release(); await worker; }
+  const again = await deactivateExtraction({ env: f.env });
+  assert.equal(again.cleanup.status, 'complete'); assert.equal(again.changed, false);
+  assert.equal(JSON.parse(await readFile(f.file)).history.length, 1);
+});
+test('extraction deactivation does not open or repair an unreadable/pending store', async t => {
+  const f = await setup(t), { deactivateExtraction } = await activation();
+  await writeFile(f.extraction.store.file, '{broken');
+  await writeFile(`${f.extraction.store.file}.control.json`, '{pending-restore');
+  const result = await deactivateExtraction({ env: f.env });
+  assert.equal(result.cleanup.status, 'complete');
+  assert.equal(await readFile(f.extraction.store.file, 'utf8'), '{broken');
+  assert.equal(await readFile(`${f.extraction.store.file}.control.json`, 'utf8'), '{pending-restore');
+});
+
+import { gzipSync } from 'node:zlib';
+import { createHash } from 'node:crypto';
+import { createShadowGraph } from '../src/shadowgraph.js';
+import { createStorage } from '../src/storage.js';
+import { privilegedSnapshot } from '../src/internal/snapshot.js';
+import { CAPTURE_LIMITS } from '../src/capture-hook.js';
+import { pinnedRuntime } from '../src/host-hooks.js';
+import { initializeUsage, usageFile, withWorkerBudget } from '../src/internal/extraction-budget.js';
+async function syntheticRuntime(directory, files) {
+  const blocks = [];
+  for (const [name, text] of Object.entries(files)) {
+    const body = Buffer.from(text);
+    const header = Buffer.alloc(512);
+    header.write(`package/${name}`, 0);
+    header.write(`${body.length.toString(8).padStart(11, '0')}\0`, 124);
+    header.write('0', 156);
+    header.write('ustar\0', 257);
+    blocks.push(header, body, Buffer.alloc((512 - (body.length % 512)) % 512));
+    await mkdir(join(directory, name, '..'), { recursive: true });
+    await writeFile(join(directory, name), body);
+  }
+  const tarball = gzipSync(Buffer.concat([...blocks, Buffer.alloc(1024)]));
+  await writeFile(join(directory, 'package.tgz'), tarball);
+  await writeFile(join(directory, 'runtime.json'), JSON.stringify({ commit: 'a'.repeat(40), tree: 'b'.repeat(40), tarballSha256: createHash('sha256').update(tarball).digest('hex') }));
+  return directory;
+}
+
+async function writable(t) {
+  const f = await setup(t);
+  const runtime = await syntheticRuntime(f.extraction.runtime.path, {
+    'src/cli.js': '// fixture', 'src/internal/capture-retention.js': '// fixture',
+    'src/capture-lifecycle-capability.json': '{"version":1}',
+    'src/extraction-capability.json': '{"version":1,"workerFloor":"PR40","activationFloor":"PR41"}',
+    'integrations/claude-code.capture-hooks.json': '{}'
+  });
+  const pinned = await pinnedRuntime(runtime);
+  f.record.capabilities.capture = { ...f.record.capabilities.capture, runtime: pinned, originId: 'origin_fixture', coverage: { projects: 'all', exclude: [] }, limits: { ...CAPTURE_LIMITS } };
+  f.record.capabilities.extraction.state = 'deactivated'; await f.save();
+  const store = await createStorage({ type: 'json', file: f.extraction.store.file });
+  await store.save(privilegedSnapshot(createShadowGraph())); store.close();
+  return { ...f, options: { env: f.env, evidence: 'synthetic-AG3', store: f.extraction.store.file, runtime,
+    settings: join(f.root, 'host-config.json'), executable: f.extraction.executor.executable, noOverageConfirmed: true,
+    executorCheck: async () => f.extraction.executor } };
+}
+test('extraction activation records a resolved gate and never refunds usage on reactivation', async t => {
+  const f = await writable(t), { activateExtraction } = await activation(), { activeExtraction } = await state();
+  const result = await activateExtraction(f.options);
+  assert.equal(result.state, 'active'); assert.equal(result.record.capabilities.extraction.noOverageConfirmed, true);
+  assert.deepEqual(result.record.capabilities.extraction.budgets, FROZEN_WORKER_BUDGETS);
+  assert.equal((await activeExtraction(f.env)).activationId, result.record.capabilities.extraction.activationId);
+  await withWorkerBudget({ env: f.env }, b => b.reserve()); const before = await readFile(usageFile(f.env));
+  const next = await activateExtraction(f.options);
+  assert.notEqual(next.record.capabilities.extraction.activationId, result.record.capabilities.extraction.activationId);
+  assert.deepEqual(await readFile(usageFile(f.env)), before);
+  assert.equal(next.record.history.length, 2);
+});
+test('extraction activation refuses missing confirmation, unresolved restrictions and old runtime before writing', async t => {
+  const f = await writable(t), { activateExtraction } = await activation(); const before = await readFile(f.file);
+  for (const patch of [{ noOverageConfirmed: false }, { noOverageConfirmed: undefined }, { executable: 'claude' }, { executorCheck: async () => ({ ok: false }) }]) {
+    await assert.rejects(activateExtraction({ ...f.options, ...patch })); assert.deepEqual(await readFile(f.file), before);
+  }
+  const old = await syntheticRuntime(join(f.root, 'shadowgraph-old'), { 'src/cli.js': '// old' });
+  await assert.rejects(activateExtraction({ ...f.options, runtime: old }), /cannot_extract/);
+  assert.deepEqual(await readFile(f.file), before);
+  await assert.rejects(readFile(usageFile(f.env)), { code: 'ENOENT' });
+});
+test('extraction activation binds the account the executor names, under a key of its own, or refuses', async t => {
+  const f = await writable(t), { activateExtraction } = await activation(); const before = await readFile(f.file);
+  const { accountFingerprint, ...unnamed } = f.extraction.executor;
+  await assert.rejects(activateExtraction({ ...f.options, executorCheck: async () => unnamed }), /extraction_account_unidentified/);
+  assert.deepEqual(await readFile(f.file), before);
+  let given;
+  const result = await activateExtraction({ ...f.options, executorCheck: async options => { given = options; return f.extraction.executor; } });
+  const executor = result.record.capabilities.extraction.executor;
+  assert.match(given.accountSalt, /^[0-9a-f]{32}$/u); assert.equal(executor.accountSalt, given.accountSalt);
+  assert.equal(executor.accountFingerprint, accountFingerprint);
+  // An activation recorded without a bound account is not one this runtime runs.
+  const { activeExtraction } = await state();
+  delete result.record.capabilities.extraction.executor.accountFingerprint; await writeFile(f.file, JSON.stringify(result.record));
+  assert.equal(await activeExtraction(f.env), null);
+});
+test('extraction activation refuses concurrent record changes and malformed usage rather than resetting either', async t => {
+  const f = await writable(t), { activateExtraction } = await activation();
+  await assert.rejects(activateExtraction({ ...f.options, afterConfirmation: () => writeFile(f.file, '{changed') }), /changed_while_confirming/);
+  assert.equal(await readFile(f.file, 'utf8'), '{changed');
+  await f.save(); await writeFile(usageFile(f.env), '{}'); const before = await readFile(f.file);
+  await assert.rejects(activateExtraction(f.options), /worker_usage_unavailable/);
+  assert.deepEqual(await readFile(f.file), before); assert.equal(await readFile(usageFile(f.env), 'utf8'), '{}');
+});
+
+import { privilegedRecordCapture } from '../src/internal/snapshot.js';
+import { extractionBinding } from '../src/internal/extraction-provenance.js';
+async function activated(t) {
+  const f = await writable(t), { activateExtraction } = await activation(); await activateExtraction(f.options);
+  const store = await createStorage({ type: 'json', file: f.extraction.store.file });
+  const graph = createShadowGraph(); graph.importData(await store.load());
+  const binding = extractionBinding(await (await state()).activeExtraction(f.env));
+  const item = privilegedRecordCapture(graph, { project: 'p', originId: 'origin_fixture', text: 'Synthetic pending work.', source: { event: 'UserPromptSubmit', sessionId: 's' },
+    observation: { host: 'synthetic-claude', hostVersion: '2.1.288', toolName: null, cwd: null, outcome: null, extractionBinding: binding },
+    admission: { limits: CAPTURE_LIMITS, storeBytes: 0 } });
+  await store.save(privilegedSnapshot(graph)); store.close();
+  const read = async () => { const s = await createStorage({ type: 'json', file: f.extraction.store.file }); try { return await s.load(); } finally { s.close(); } };
+  return { ...f, item, read };
+}
+test('activated worker is inert without activation and refuses a different running runtime before any executor', async t => {
+  const f = await writable(t), { runActivatedExtraction } = await import('../src/extraction-runtime.js'); let calls = 0;
+  const options = { env: f.env, project: 'p', executorFactory: () => { calls++; throw new Error('must not enter'); } };
+  assert.equal((await runActivatedExtraction(options)).status, 'inactive');
+  await (await activation()).activateExtraction(f.options);
+  assert.equal((await runActivatedExtraction(options)).blockedReason, 'runtime_mismatch'); assert.equal(calls, 0);
+});
+test('deactivation interrupts a model call, retains pending work and waits for local child settlement', async t => {
+  const f = await activated(t), { runActivatedExtraction } = await import('../src/extraction-runtime.js');
+  let entered, stopped = false; const ready = new Promise(r => { entered = r; });
+  const controller = new AbortController(); t.after(() => controller.abort());
+  const worker = runActivatedExtraction({ env: f.env, project: 'p', runtimeDirectory: f.options.runtime, signal: controller.signal,
+    executorFactory: () => ({ extract: async ({ signal }) => {
+      // The store can be opened independently: no worker store is held across invocation.
+      assert.equal((await f.read()).records.find(x => x.id === f.item.id).state, 'processing'); entered();
+      await new Promise(resolve => { if (signal.aborted) resolve(); else signal.addEventListener('abort', resolve, { once: true }); });
+      await new Promise(resolve => setTimeout(resolve, 50)); stopped = true;
+      return { status: 'success', value: { records: [] }, receipt: { invocationStarted: true, model: 'claude-opus-5[1m]' } };
+    } }) });
+  await ready;
+  const result = await (await activation()).deactivateExtraction({ env: f.env });
+  assert.equal(result.cleanup.status, 'complete'); assert.equal(stopped, true);
+  assert.equal((await worker).status, 'blocked');
+  const item = (await f.read()).records.find(x => x.id === f.item.id);
+  assert.equal(item.state, 'pending'); assert.equal(item.receipts.length, 0); assert.equal(item.lease, null);
+});
+test('automatic extraction follows capture coverage; explicit manual project does not consume other projects', async t => {
+  const f = await activated(t), { runActivatedExtraction } = await import('../src/extraction-runtime.js'); let calls = 0;
+  const data = JSON.parse(await readFile(f.file)); data.capabilities.capture.coverage = { projects: 'only', include: ['other'] }; await writeFile(f.file, JSON.stringify(data));
+  const options = { env: f.env, runtimeDirectory: f.options.runtime, executorFactory: () => ({ extract: async () => { calls++; return { status: 'success', value: { records: [] }, receipt: { invocationStarted: true, model: 'claude-opus-5[1m]' } }; } }) };
+  assert.equal((await runActivatedExtraction({ ...options, automatic: true })).status, 'idle'); assert.equal(calls, 0);
+  assert.equal((await runActivatedExtraction({ ...options, project: 'other' })).status, 'idle'); assert.equal(calls, 0);
+  assert.equal((await runActivatedExtraction({ ...options, project: 'p' })).completed, 1); assert.equal(calls, 1);
+});
+
+// A drain stops at its per-drain item budget; the same worker runs further
+// rounds, each bounded alike, until the queue is empty -- and a trigger that
+// met it busy is answered by one more round, not lost.
+test('one automatic worker drains past the per-drain item budget in bounded rounds, and answers a trigger that came while it ran', async t => {
+  const f = await activated(t), { runActivatedExtraction } = await import('../src/extraction-runtime.js');
+  const { requestFile } = await import('../src/internal/extraction-state.js');
+  const store = await createStorage({ type: 'json', file: f.extraction.store.file });
+  const graph = createShadowGraph(); graph.importData(await store.load());
+  const binding = extractionBinding(await (await state()).activeExtraction(f.env));
+  const add = (session) => privilegedRecordCapture(graph, { project: 'p', originId: 'origin_fixture', text: `Synthetic pending work ${session}.`, source: { event: 'UserPromptSubmit', sessionId: session },
+    observation: { host: 'synthetic-claude', hostVersion: '2.1.288', toolName: null, cwd: null, outcome: null, extractionBinding: binding }, admission: { limits: CAPTURE_LIMITS, storeBytes: 0 } });
+  for (let index = 0; index < 8; index += 1) add(`more-${index}`);
+  await store.save(privilegedSnapshot(graph)); store.close();
+  let calls = 0, late = false;
+  const result = await runActivatedExtraction({ env: f.env, runtimeDirectory: f.options.runtime, automatic: true, executorFactory: () => ({ extract: async () => {
+    calls += 1;
+    // While the last item of the queue is being extracted, a capture lands and its trigger meets the busy worker.
+    if (calls === 9 && !late) {
+      late = true;
+      const s = await createStorage({ type: 'json', file: f.extraction.store.file }); const g = createShadowGraph(); g.importData(await s.load());
+      privilegedRecordCapture(g, { project: 'p', originId: 'origin_fixture', text: 'Arrived during the drain.', source: { event: 'UserPromptSubmit', sessionId: 'late' },
+        observation: { host: 'synthetic-claude', hostVersion: '2.1.288', toolName: null, cwd: null, outcome: null, extractionBinding: binding }, admission: { limits: CAPTURE_LIMITS, storeBytes: 0 } });
+      await s.save(privilegedSnapshot(g)); s.close();
+      await writeFile(requestFile(f.env), new Date().toISOString());
+    }
+    return { status: 'success', value: { records: [] }, receipt: { invocationStarted: true, model: 'claude-opus-5[1m]' } };
+  } }) });
+  assert.equal(calls, 10, 'nine queued and one that arrived meanwhile');
+  assert.equal(result.completed, 10);
+  assert.ok(result.rounds >= 3, JSON.stringify(result));
+  assert.ok((await f.read()).records.filter(item => item.kind === 'capture').every(item => item.state === 'extracted'));
+});
+
+// Review of the route (2026-10-27), finding 8: a triggered worker that meets a
+// finishing one waits for it rather than leaving the trigger unanswered.
+test('a triggered worker waits briefly for a finishing worker instead of giving up', async t => {
+  const f = await activated(t), { runActivatedExtraction } = await import('../src/extraction-runtime.js');
+  const { workerFenceFile } = await state();
+  let release; const finishing = createDestinationFence(workerFenceFile(f.env)).run(() => new Promise(resolve => { release = resolve; }));
+  setTimeout(() => release(), 1000);
+  let calls = 0;
+  const result = await runActivatedExtraction({ env: f.env, runtimeDirectory: f.options.runtime, automatic: true, executorFactory: () => ({ extract: async () => { calls += 1;
+    return { status: 'success', value: { records: [] }, receipt: { invocationStarted: true, model: 'claude-opus-5[1m]' } }; } }) });
+  await finishing;
+  assert.equal(calls, 1, JSON.stringify(result));
+  assert.equal(result.completed, 1);
+});
+
+import { EventEmitter } from 'node:events';
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { changeHookSettings } from '../src/host-hooks.js';
+test('trigger only requests detached one-shot extraction after eligible capture; self traffic cannot recurse', async t => {
+  const f = await activated(t), { triggerExtraction } = await import('../src/internal/extraction-trigger.js');
+  const calls = []; let unrefs = 0;
+  const options = { env: f.env, runtimeDirectory: f.options.runtime, deadline: Date.now() + 5000, spawnProcess: (...args) => {
+    calls.push(args); const child = new EventEmitter(); child.unref = () => { unrefs++; }; return child;
+  } };
+  for (const event of ['Stop', 'SessionEnd']) assert.equal((await triggerExtraction({ ...options, event, outcome: 'written' })).status, 'requested');
+  assert.equal(calls.length, 2); assert.equal(unrefs, 2);
+  for (const [executable, args, spawnOptions] of calls) {
+    assert.equal(executable, process.execPath); assert.deepEqual(args.slice(1), ['extract', '--automatic']);
+    assert.equal(spawnOptions.detached, true); assert.equal(spawnOptions.windowsHide, true); assert.equal(spawnOptions.shell, false); assert.equal(spawnOptions.stdio, 'ignore');
+    assert.equal(spawnOptions.env.SHADOWGRAPH_HOME, f.env.SHADOWGRAPH_HOME);
+  }
+  for (const patch of [{ event: 'UserPromptSubmit' }, { outcome: 'self_event' }, { outcome: 'out_of_time' }, { deadline: 0 }, { runtimeDirectory: f.root }]) {
+    assert.equal((await triggerExtraction({ ...options, event: 'Stop', outcome: 'written', ...patch })).status, 'inert');
+  }
+  await (await activation()).deactivateExtraction({ env: f.env });
+  assert.equal((await triggerExtraction({ ...options, event: 'Stop', outcome: 'written' })).status, 'inert'); assert.equal(calls.length, 2);
+});
+test('the requested worker inherits no host-session provider route or session token', async t => {
+  const f = await activated(t), { triggerExtraction } = await import('../src/internal/extraction-trigger.js'); let spawned;
+  // What a desktop host sets in every hook it runs, next to what the worker needs.
+  const env = { ...f.env, Path: 'C:\\Windows', SystemRoot: 'C:\\Windows', USERPROFILE: f.root, SHADOWGRAPH_FILE: 'manual.json',
+    ANTHROPIC_BASE_URL: 'https://api.anthropic.com', CLAUDE_CODE_SIMPLE: '1', CLAUDE_CODE_MESSAGING_TOKEN: 'session', CLAUDECODE: '1', HTTPS_PROXY: 'http://proxy' };
+  const result = await triggerExtraction({ env, runtimeDirectory: f.options.runtime, deadline: Date.now() + 5000, event: 'Stop', outcome: 'written',
+    spawnProcess: (...args) => { spawned = args[2].env; const child = new EventEmitter(); child.unref = () => {}; return child; } });
+  assert.equal(result.status, 'requested');
+  assert.deepEqual(Object.keys(spawned).sort(), ['NoDefaultCurrentDirectoryInExePath', 'Path', 'SHADOWGRAPH_FILE', 'SHADOWGRAPH_HOME', 'SystemRoot', 'USERPROFILE']);
+});
+test('a session under another profile or a session token does not start the worker', async t => {
+  const f = await activated(t), { triggerExtraction } = await import('../src/internal/extraction-trigger.js'); let spawned = 0;
+  const run = env => triggerExtraction({ env: { ...f.env, ...env }, runtimeDirectory: f.options.runtime, deadline: Date.now() + 5000, event: 'Stop', outcome: 'written',
+    spawnProcess: () => { spawned++; const child = new EventEmitter(); child.unref = () => {}; return child; } });
+  for (const selector of [{ CLAUDE_CONFIG_DIR: join(f.root, 'other-profile') }, { CLAUDE_CODE_OAUTH_TOKEN: 'synthetic-token' }, { Claude_Config_Dir: join(f.root, 'other-profile') }]) {
+    assert.deepEqual(await run(selector), { status: 'refused', reason: 'session_profile_selected' });
+  }
+  assert.equal(spawned, 0);
+  assert.equal((await run({ CLAUDE_CONFIG_DIR: '', CLAUDE_CODE_OAUTH_TOKEN: '' })).status, 'requested', 'an empty selector selects nothing');
+  assert.equal(spawned, 1);
+  // A desktop host names its session's account: only the bound one starts the worker.
+  const { accountEmailDigest } = await import('../src/internal/extraction-contract.js');
+  assert.deepEqual(await run({ CLAUDE_CODE_USER_EMAIL: 'owner@example.invalid' }), { status: 'refused', reason: 'session_account_differs' }, 'no bound e-mail: refused');
+  const record = JSON.parse(await readFile(f.file, 'utf8')), executor = record.capabilities.extraction.executor;
+  executor.accountEmailFingerprint = accountEmailDigest(executor.accountSalt, 'owner@example.invalid'); await writeFile(f.file, JSON.stringify(record));
+  assert.equal((await run({ CLAUDE_CODE_USER_EMAIL: ' Owner@Example.invalid ' })).status, 'requested');
+  assert.deepEqual(await run({ CLAUDE_CODE_USER_EMAIL: 'other@example.invalid' }), { status: 'refused', reason: 'session_account_differs' });
+  assert.equal(spawned, 2);
+});
+test('uninstall disables extraction even when no hooks remain', async t => {
+  const f = await activated(t); const settings = join(f.root, 'host-config.json'); await writeFile(settings, '{"model":"owner-choice"}');
+  const result = await changeHookSettings(settings, 'uninstall', { env: f.env });
+  assert.equal(result.removed, 0); assert.equal(result.extraction.state, 'deactivated');
+  assert.equal(await (await state()).activeExtraction(f.env), null); assert.equal(await readFile(settings, 'utf8'), '{"model":"owner-choice"}');
+});
+test('extract CLI dispatch is inert without activation and never opens its manual store override', async t => {
+  const root = await scratchDirectory(t), manual = join(root, 'manual.json'); await writeFile(manual, 'manual-canary');
+  const child = spawn(process.execPath, [fileURLToPath(new URL('../src/cli.js', import.meta.url)), 'extract'], {
+    cwd: root, env: { ...process.env, SHADOWGRAPH_HOME: root, SHADOWGRAPH_FILE: manual }, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  let stdout = '', stderr = ''; child.stdout.on('data', b => { stdout += b; }); child.stderr.on('data', b => { stderr += b; });
+  const code = await new Promise(resolve => child.once('close', resolve));
+  assert.equal(code, 0, stderr); assert.equal(JSON.parse(stdout).status, 'inactive'); assert.equal(await readFile(manual, 'utf8'), 'manual-canary');
+});
+
+test('unconfirmed executor settlement remains deferred after the lifetime lock is released', async t => {
+  const f = await activated(t), { runActivatedExtraction } = await import('../src/extraction-runtime.js');
+  let enter, release; const ready = new Promise(r => { enter = r; });
+  const worker = runActivatedExtraction({ env: f.env, project: 'p', runtimeDirectory: f.options.runtime,
+    executorFactory: () => ({ extract: () => new Promise(r => { release = r; enter(); }) }) });
+  await ready;
+  const result = await (await activation()).deactivateExtraction({ env: f.env, cleanupTimeoutMs: 3000 });
+  assert.equal((await worker).cleanup.status, 'deferred');
+  assert.equal(result.cleanup.status, 'deferred');
+  assert.equal((await (await activation()).deactivateExtraction({ env: f.env })).cleanup.status, 'deferred');
+  release({ status: 'blocked' });
+});
+
+test('availability is a fresh scoped read projection, never persisted or inferred for another store', async t => {
+  const f = await activated(t), { readExtractionAvailability } = await import('../src/internal/extraction-availability.js');
+  const record = JSON.parse(await readFile(f.file)); record.capabilities.capture.coverage = { projects: 'only', include: ['p'] }; await writeFile(f.file, JSON.stringify(record));
+  const before = await readFile(f.extraction.store.file);
+  const available = await readExtractionAvailability({ file: f.extraction.store.file, storage: 'json', env: f.env });
+  const graph = createShadowGraph({ extractionAvailable: available }); graph.importData(await f.read());
+  assert.equal(graph.search('', { project: 'p' }).completeness.capture.extractionAvailable, true);
+  assert.equal(graph.search('', { project: 'other' }).completeness.capture.extractionAvailable, false);
+  assert.equal(available.active, true);
+  const detached = createShadowGraph(); detached.importData(privilegedSnapshot(graph));
+  assert.equal(detached.search('', { project: 'p' }).completeness.capture.extractionAvailable, false);
+  assert.equal((await readExtractionAvailability({ file: join(f.root, 'manual-other'), storage: 'json', env: f.env })).active, false);
+  await (await activation()).deactivateExtraction({ env: f.env });
+  assert.equal((await readExtractionAvailability({ file: f.extraction.store.file, storage: 'json', env: f.env })).active, false);
+  assert.deepEqual(await readFile(f.extraction.store.file), before);
+});
+
+test('availability carries the active setup binding, so a reactivated setup reports the earlier one apart (R7)', async t => {
+  const f = await activated(t), { readExtractionAvailability } = await import('../src/internal/extraction-availability.js');
+  const statusUnder = async () => {
+    const available = await readExtractionAvailability({ file: f.extraction.store.file, storage: 'json', env: f.env });
+    const graph = createShadowGraph({ extractionAvailable: available }); graph.importData(await f.read());
+    return { available, capture: graph.search('', { project: 'p' }).completeness.capture };
+  };
+  const first = await statusUnder();
+  assert.deepEqual(first.available.binding, extractionBinding(await (await state()).activeExtraction(f.env)));
+  assert.equal(first.capture.pending, 1); assert.equal(first.capture.priorSetup, undefined);
+  await (await activation()).deactivateExtraction({ env: f.env });
+  assert.equal((await statusUnder()).available.binding, undefined);
+  assert.equal((await statusUnder()).capture.pending, 1, 'with no active setup the count is unchanged');
+  await (await activation()).activateExtraction(f.options);
+  const second = await statusUnder();
+  assert.notEqual(second.available.binding.setupId, first.available.binding.setupId);
+  assert.equal(second.capture.pending, 0); assert.equal(second.capture.oldestPendingAt, null);
+  assert.equal(second.capture.priorSetup, 1);
+  assert.ok(second.capture.gaps.some(gap => gap.reason === 'prior_setup'));
+});
+
+import { runBounded } from '../src/extractor.js';
+test('real local child exits before deactivation reports complete and its model result is discarded', async t => {
+  const f = await activated(t), { runActivatedExtraction } = await import('../src/extraction-runtime.js');
+  let ready, childPid, stopped; const entered = new Promise(r => { ready = r; });
+  const worker = runActivatedExtraction({ env: f.env, project: 'p', runtimeDirectory: f.options.runtime, executorFactory: () => ({ extract: async ({ signal }) => {
+    const out = await runBounded({ executable: process.execPath, args: ['-e', 'process.stdout.write("ready");setInterval(()=>{},1000)'], cwd: f.root, env: process.env, signal,
+      spawnProcess: (...args) => { const child = spawn(...args); childPid = child.pid; child.stdout.once('data', ready); return child; } });
+    stopped = out.localChildStopped;
+    return { status: 'blocked', receipt: { localChildStopped: out.localChildStopped } };
+  } }) });
+  await entered; assert.ok(Number.isInteger(childPid));
+  const result = await (await activation()).deactivateExtraction({ env: f.env });
+  assert.equal(result.cleanup.status, 'complete'); assert.equal(stopped, true); assert.equal((await worker).completed, 0);
+  assert.throws(() => process.kill(childPid, 0));
+  assert.equal((await f.read()).records.find(x => x.id === f.item.id).state, 'pending');
+});
+import { createShadowGraphServer } from '../src/server.js';
+test('HTTP refreshes extraction availability after deactivation and exposes no activation or extraction route', async t => {
+  const f = await activated(t);
+  const app = await createShadowGraphServer({ file: f.extraction.store.file, env: f.env, cwd: f.root });
+  await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => app.server.close(resolve)));
+  const url = `http://127.0.0.1:${app.server.address().port}`;
+  const first = await (await fetch(`${url}/search?project=p`)).json();
+  assert.equal(first.completeness.capture.extractionAvailable, true);
+  for (const path of ['/extract', '/activate/extraction']) assert.equal((await fetch(url + path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })).status, 404);
+  await (await activation()).deactivateExtraction({ env: f.env });
+  assert.equal((await (await fetch(`${url}/search?project=p`)).json()).completeness.capture.extractionAvailable, false);
+});
+
+import { setTimeout as pause } from 'node:timers/promises';
+test('killed activated worker is reclaimed after proved child shutdown and lease expiry without duplicate output', async t => {
+  const f = await activated(t), ready = join(f.root, 'ready-child.json');
+  const runtimeUrl = new URL('../src/extraction-runtime.js', import.meta.url).href;
+  const supervisionUrl = new URL('../src/internal/extraction-supervision.js', import.meta.url).href;
+  const request = { executable: process.execPath, args: ['-e', `require('fs').writeFileSync(${JSON.stringify(ready)},JSON.stringify({pid:process.pid}));setInterval(()=>{},1000)`], cwd: f.root, input: '', timeoutMs: 10000, maxOutputBytes: 100 };
+  const code = `import {runActivatedExtraction} from ${JSON.stringify(runtimeUrl)};import {runSupervised} from ${JSON.stringify(supervisionUrl)};await runActivatedExtraction({env:process.env,project:'p',runtimeDirectory:${JSON.stringify(f.options.runtime)},executorFactory:({supervision})=>({extract:({signal})=>runSupervised({...${JSON.stringify(request)},env:process.env,signal},supervision)})});`;
+  const parent = spawn(process.execPath, ['--input-type=module', '-e', code], { cwd: f.root, env: { ...process.env, ...f.env }, windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] });
+  let errors = ''; parent.stderr.on('data', b => { errors += b; }); t.after(() => parent.kill('SIGKILL'));
+  let child;
+  for (let i = 0; i < 100; i++) { child = await readFile(ready, 'utf8').then(JSON.parse, () => null); if (child) break; await pause(50); }
+  assert.ok(child?.pid, errors);
+  assert.equal((await f.read()).records.find(x => x.id === f.item.id).state, 'processing');
+  const closed = new Promise(resolve => parent.once('close', resolve)); parent.kill('SIGKILL'); await closed;
+  const { workerSettlement } = await state();
+  for (let i = 0; i < 100 && await workerSettlement(f.env) !== 'clear'; i++) await pause(25);
+  assert.equal(await workerSettlement(f.env), 'clear'); assert.throws(() => process.kill(child.pid, 0));
+  await pause(2100); // The killed process's two-second stale fence, not a model wait.
+  // Match the simulated five-minute lease expiry for the separate usage fence.
+  await utimes(await fenceLockPath(usageFile(f.env)), new Date(0), new Date(0));
+  const { runActivatedExtraction } = await import(runtimeUrl); let calls = 0;
+  const out = await runActivatedExtraction({ env: f.env, project: 'p', runtimeDirectory: f.options.runtime, now: () => new Date(Date.now() + 301000).toISOString(),
+    executorFactory: () => ({ extract: async () => { calls++; return { status: 'success', value: { records: [] }, receipt: { invocationStarted: true, model: 'claude-opus-5[1m]' } }; } }) });
+  assert.equal(out.completed, 1, JSON.stringify(out)); assert.equal(calls, 1);
+  const data = await f.read(), item = data.records.find(x => x.id === f.item.id);
+  assert.equal(item.state, 'extracted'); assert.equal(item.receipts.length, 1); assert.equal(item.lease, null);
+  assert.ok(data.captureSessions[0].gaps.some(gap => gap.reason === 'extraction_unknown_period'));
+});
+
+
+test('concurrent deactivation preserves both disabled capabilities and both history entries', async t => {
+  const f = await setup(t), api = await activation();
+  f.record.capabilities.delivery = structuredClone(f.record.capabilities.capture);
+  for (let i = 0; i < 8; i++) {
+    await f.save();
+    const [extraction, delivery] = await Promise.all([api.deactivateExtraction({ env: f.env }), api.deactivateDelivery({ env: f.env })]);
+    assert.equal(extraction.state, 'deactivated'); assert.equal(delivery.state, 'deactivated');
+    const record = JSON.parse(await readFile(f.file));
+    assert.equal(record.capabilities.extraction.state, 'deactivated');
+    assert.equal(record.capabilities.delivery.state, 'deactivated');
+    assert.deepEqual(record.history.map(x => x.capability).sort(), ['delivery', 'extraction']);
+    assert.equal(await (await state()).activeExtraction(f.env), null);
+  }
+});
+
+// D1 (owner decision 2026-10-08): extraction on host 2.1.292 is trusted only
+// with a passing real-host validation receipt for its exact binary under the
+// activated runtime. The version string and the configuration check alone never do.
+import { HOST_PROFILES } from '../src/internal/extraction-contract.js';
+async function validation292(t) {
+  const f = await writable(t);
+  const executor = { ...f.extraction.executor, hostVersion: '2.1.292', binarySha256: HOST_PROFILES['2.1.292'].binarySha256 };
+  const receipt = { kind: 'shadowgraph-extraction-host-validation', version: 1, hostVersion: '2.1.292', binarySha256: executor.binarySha256,
+    runtimeCommit: 'a'.repeat(40), validatedAt: '2026-10-08T00:00:00.000Z', checks: { confinement: 'pass', routing: 'pass', recursion: 'pass', shutdown: 'pass' } };
+  const file = join(f.root, 'host-validation.json');
+  return { ...f, executor, receipt, receiptFile: file, options: { ...f.options, executorCheck: async () => structuredClone(executor) } };
+}
+test('a 2.1.292 host activates extraction only with a passing validation receipt for that binary under this runtime', async t => {
+  const f = await validation292(t), { activateExtraction } = await activation(), { activeExtraction } = await state();
+  const before = await readFile(f.file);
+  await assert.rejects(activateExtraction(f.options), /extraction_host_validation_required/);
+  for (const change of [r => { r.binarySha256 = 'c'.repeat(64); }, r => { r.runtimeCommit = 'c'.repeat(40); }, r => { r.checks.shutdown = 'fail'; },
+    r => { delete r.checks.recursion; }, r => { r.kind = 'other'; }, r => { r.hostVersion = '2.1.288'; }]) {
+    const copy = structuredClone(f.receipt); change(copy); await writeFile(f.receiptFile, JSON.stringify(copy));
+    await assert.rejects(activateExtraction({ ...f.options, hostValidation: f.receiptFile }), /extraction_host_validation_mismatch/);
+  }
+  await writeFile(f.receiptFile, '{broken');
+  await assert.rejects(activateExtraction({ ...f.options, hostValidation: f.receiptFile }), /extraction_host_validation_unreadable/);
+  assert.deepEqual(await readFile(f.file), before, 'nothing was written');
+  // A different binary that reports 2.1.292 is refused even with a matching receipt.
+  await writeFile(f.receiptFile, JSON.stringify({ ...f.receipt, binarySha256: 'd'.repeat(64) }));
+  await assert.rejects(activateExtraction({ ...f.options, hostValidation: f.receiptFile, executorCheck: async () => ({ ...f.executor, binarySha256: 'd'.repeat(64) }) }), /extraction_executor_unverified/);
+  const bytes = JSON.stringify(f.receipt); await writeFile(f.receiptFile, bytes);
+  const result = await activateExtraction({ ...f.options, hostValidation: f.receiptFile });
+  assert.equal(result.state, 'active');
+  const active = await activeExtraction(f.env);
+  assert.equal(active.executor.hostVersion, '2.1.292');
+  assert.equal(active.executor.hostValidation.sha256, createHash('sha256').update(bytes).digest('hex'));
+  assert.equal(active.executor.hostValidation.runtimeCommit, 'a'.repeat(40));
+});
+test('an activation records whether a remote policy cache was left to the host\'s own report', async t => {
+  const f = await validation292(t), { activateExtraction } = await activation(), { activeExtraction } = await state();
+  await writeFile(f.receiptFile, JSON.stringify(f.receipt));
+  const remotePolicy = { cache: 'present', applicability: 'host_reported_ineligible', conflict: 'not_assessed' };
+  const result = await activateExtraction({ ...f.options, hostValidation: f.receiptFile, executorCheck: async () => ({ ...structuredClone(f.executor), remotePolicy }) });
+  assert.deepEqual((await activeExtraction(f.env)).executor.remotePolicy, remotePolicy);
+  assert.deepEqual(result.record.history.at(-1).executor.remotePolicy, remotePolicy);
+});
+test('the extraction reader refuses a 2.1.292 record without its validation or with one bound to another runtime', async t => {
+  const f = await setup(t), { activeExtraction } = await state();
+  const executor = f.record.capabilities.extraction.executor;
+  Object.assign(executor, { hostVersion: '2.1.292', binarySha256: HOST_PROFILES['2.1.292'].binarySha256 });
+  await f.save(); assert.equal(await activeExtraction(f.env), null, 'no validation record');
+  executor.hostValidation = { file: join(f.root, 'v.json'), sha256: 'e'.repeat(64), hostVersion: '2.1.292', binarySha256: executor.binarySha256, runtimeCommit: 'c'.repeat(40), validatedAt: null };
+  await f.save(); assert.equal(await activeExtraction(f.env), null, 'validation of another runtime');
+  executor.hostValidation.runtimeCommit = f.record.capabilities.extraction.runtime.commit;
+  await f.save(); assert.equal((await activeExtraction(f.env)).executor.hostVersion, '2.1.292');
+  executor.binarySha256 = 'd'.repeat(64); executor.hostValidation.binarySha256 = 'd'.repeat(64);
+  await f.save(); assert.equal(await activeExtraction(f.env), null, 'a binary the profile does not name');
+});

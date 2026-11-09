@@ -2,11 +2,42 @@
 
 Use ShadowGraph as a decision ledger, not as unquestioned truth.
 
+```mermaid
+graph TD
+    Start([Turn Start: Consequential Task]) --> PreFlight
+
+    subgraph PreFlight ["1. Pre-Flight Verification & Context Recall"]
+        P1["Call shadowgraph_context(project, task)"] --> P2["Inspect advisory items & active conditions"]
+        P2 --> P3["Call shadowgraph_recall(query, includeHistory=true)"]
+        P3 --> P4["Audit provenance: inspect sourceClass\n(Treat unverified hypotheses with caution)"]
+    end
+
+    PreFlight --> ExecutionPhase
+
+    subgraph ExecutionPhase ["2. In-Flight Execution & Graph Recording"]
+        E1["Record proposed decision:\nshadowgraph_record_decision"] --> E2["Execute action or task"]
+        E2 --> E3["Record attempt & reusable conditions:\nshadowgraph_record_attempt(reusableWhen)"]
+        E3 --> E4["Record bi-temporal facts:\nshadowgraph_record_fact(key, value, project)"]
+    end
+
+    ExecutionPhase --> PostFlight
+
+    subgraph PostFlight ["3. Post-Flight Governance & Review Signals"]
+        PF1["Record outcome with autoTransition:\nshadowgraph_record_outcome(decisionStatus)"] --> PF2["Run graph review:\nshadowgraph_review(project)"]
+        PF2 --> PF3{Review signals raised?}
+        PF3 -- Yes --> PF4["Inspect signals:\nshadowgraph_review_signals(project)"]
+        PF4 --> PF5["Acknowledge signal:\nshadowgraph_ack_review(reviewSignalId)"]
+        PF5 --> PF6["If condition invalidated:\nsupersede decision or adapt"]
+        PF3 -- No --> Complete([Turn Complete])
+        PF6 --> Complete
+    end
+```
+
 ## Before consequential work
 
-1. Choose a stable idempotency key before the first write; reuse it only for an exact retry; use a new key for a new logical operation.
-2. Call `shadowgraph_context` for the project.
-3. Call `shadowgraph_recall` for scoped/temporal memory and `shadowgraph_retrieve` for decision compatibility. Inspect matched signals, facts, failed attempts, and superseded decisions. Use the same project and scope on later reads. Run-scoped memory does not automatically survive across runs.
+1. Choose a stable idempotency key before the first write; reuse it only for an exact retry and use a new key for a new logical operation.
+2. Call `shadowgraph_context` for the project (optionally passing `task` to also inspect `userMemories`, `successfulApproaches`, `crossProjectExperience`, and `relevantToTask`).
+3. Call `shadowgraph_recall` for scoped/temporal memory (passing `includeHistory: true` when inspecting prior versions and `changeSummary` evolution) and `shadowgraph_retrieve` for decision compatibility. Inspect matched signals, facts, failed attempts (`reusableWhen` conditions and `visibility`), and superseded decisions. Use the same project and scope on later reads. Run-scoped memory does not automatically survive across runs.
 4. Treat every fact as an **unverified hypothesis**. Legacy imported `verificationStatus: 'verified'` values may be preserved for compatibility, but this build has no agent-accessible verification channel and no tool input can create verified facts. Read `sourceClass`, not `source`.
 
 ## Provenance vocabulary
@@ -31,7 +62,7 @@ Rules that the server enforces, so do not attempt to work around them:
 ## During work
 
 1. Record a decision with its chosen approach, assumptions, evidence, and rejected alternatives.
-2. Record each failed or informative attempt and its lesson.
+2. Record each failed or informative attempt with explicit `resultClass`, reason, and environment.
 3. Record facts with provenance, verification status, expiry, and project.
 4. Use relationships to connect decisions, facts, attempts, and evidence.
 5. Use `shadowgraph_remember` for durable preferences, profile facts, goals, instructions, procedures, episodes, or notes. Do not flatten a consequential decision into general memory.
@@ -42,7 +73,7 @@ Rules that the server enforces, so do not attempt to work around them:
 1. Record the outcome.
 2. Update the decision status.
 3. Call `shadowgraph_maintain` when facts or time-sensitive conditions changed.
-4. Review and acknowledge open review signals; do not silently continue from a stale decision.
+4. Review and acknowledge open review signals as seen, not resolved; do not silently continue from a stale decision. `shadowgraph_context` is a read and persists no signal: call `shadowgraph_review_context` or `shadowgraph_review` to raise the signal ids that `shadowgraph_ack_review` takes.
 
 ## Privacy and integrity
 

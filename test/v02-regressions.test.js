@@ -5,22 +5,23 @@ import { join } from 'node:path';
 import { createJsonFileStore } from '../src/storage.js';
 import { createShadowGraph } from '../src/shadowgraph.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
+import { privilegedSnapshot } from '../src/internal/snapshot.js';
 
 test('superseding a fact exposes the old fact as stale context', () => {
   const graph = createShadowGraph();
-  graph.addFact({ key: 'mode', value: 'cloud' });
-  graph.addFact({ key: 'mode', value: 'local' });
-  assert.equal(graph.context().staleAssumptions.length, 1);
-  assert.equal(graph.context().staleAssumptions[0].value, 'cloud');
+  graph.addFact({ project: 'default', key: 'mode', value: 'cloud' });
+  graph.addFact({ project: 'default', key: 'mode', value: 'local' });
+  assert.equal(graph.context({ project: 'default' }).staleAssumptions.length, 1);
+  assert.equal(graph.context({ project: 'default' }).staleAssumptions[0].value, 'cloud');
 });
 
 test('review returns only alternatives whose rules matched', () => {
   const graph = createShadowGraph();
-  graph.addDecision({ title: 'Architecture', chosen: 'A', alternatives: [
+  graph.addDecision({ project: 'default', title: 'Architecture', chosen: 'A', alternatives: [
     { label: 'B', reopenWhen: ['local'] },
     { label: 'C', reopenWhen: ['cloud'] }
   ] });
-  assert.deepEqual(graph.review({ changedFacts: ['local'] })[0].alternativesToReconsider, ['B']);
+  assert.deepEqual(graph.review({ project: 'default', changedFacts: ['local'] }).items[0].alternativesToReconsider, ['B']);
 });
 
 test('loads a v0.1 array file through the storage boundary', async (t) => {
@@ -30,5 +31,5 @@ test('loads a v0.1 array file through the storage boundary', async (t) => {
   const store = createJsonFileStore(file);
   const graph = createShadowGraph();
   graph.importData(await store.load());
-  assert.equal(graph.exportData().records[0].confidence.current, 0.7);
+  assert.equal(privilegedSnapshot(graph).records[0].confidence.current, 0.7);
 });

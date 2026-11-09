@@ -2,7 +2,7 @@
 
 ## Vision
 
-ShadowGraph is a permanent, portable, local-first decision memory for AI agents. It preserves the reasoning trail behind consequential work so Claude, Codex, Cursor, Antigravity, Hermes Agent, OpenClaw, and future clients can recall decisions, rejected alternatives, assumptions, evidence, failed attempts, outcomes, confidence, and reconsideration triggers across sessions.
+ShadowGraph is a durable, portable, local-first decision memory for AI agents. It preserves the reasoning trail behind consequential work so Claude, Codex, Cursor, Antigravity, Hermes Agent, OpenClaw, and future clients can recall decisions, rejected alternatives, assumptions, evidence, failed attempts, outcomes, confidence, and reconsideration triggers across sessions.
 
 The product promise is not "make every answer smarter." It is: **make important decisions durable, explainable, reviewable, and resistant to repeated mistakes.**
 

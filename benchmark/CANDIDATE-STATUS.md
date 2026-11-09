@@ -1,6 +1,6 @@
 # ShadowGraph benchmark v1.1 — candidate status
 
-ShadowGraph the product remains at **0.41.0** and `"private": true`. "v1.1" names
+ShadowGraph the product is at **0.42.0** (Technical Preview) and `"private": true`. "v1.1" names
 the benchmark methodology and candidate only. It is not a product release.
 
 **This candidate has produced no scored benchmark result, and no comparative

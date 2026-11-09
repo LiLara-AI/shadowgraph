@@ -10,6 +10,8 @@ import { scratchDirectory } from '../tools/scratch-directory.js';
 const exec = promisify(execFile);
 const projectRoot = fileURLToPath(new URL('..', import.meta.url));
 const checkerSource = join(projectRoot, 'scripts', 'check-package.mjs');
+// The checker's one local dependency: the credential detector it shares with host delivery.
+const detectorSource = join(projectRoot, 'src', 'internal', 'credential-literal.js');
 const requiredFixtureFiles = [
   'README.md',
   'SECURITY.md',
@@ -17,6 +19,13 @@ const requiredFixtureFiles = [
   'dashboard/index.html',
   'docs/api-reference.md',
   'docs/benchmark-report.md',
+  'docs/extraction.md',
+  'docs/claude-code-integration.md',
+  'src/internal/capture-spool.js',
+  'docs/codex-integration.md',
+  'src/codex-cli.js',
+  'src/codex-host.js',
+  'src/codex-extractor.js',
   'docs/mcp-compatibility.md',
   'docs/shadowgraph-benchmark-plan.md',
   'docs/unified-memory.md',
@@ -50,6 +59,8 @@ const requiredFixtureFiles = [
   'benchmark/preregistration-amendment-006.sha256',
   'benchmark/acceptance/definition.json',
   'benchmark/acceptance/scenarios.json',
+  'integrations/claude-code.coverage.json',
+  'integrations/claude-code.hooks.json',
   'integrations/claude-code.mcp.json',
   'integrations/codex.mcp.toml',
   'integrations/cursor.mcp.json',
@@ -96,6 +107,9 @@ async function packageFixture(t, auditText) {
     if (relativePath === 'scripts/check-package.mjs') await copyFile(checkerSource, path);
     else await writeFile(path, `harmless fixture for ${relativePath}\n`, 'utf8');
   }
+  const detector = join(root, 'src', 'internal', 'credential-literal.js');
+  await mkdir(dirname(detector), { recursive: true });
+  await copyFile(detectorSource, detector);
   const auditPath = join(root, 'docs', 'package-text-audit.md');
   await writeFile(auditPath, auditText, 'utf8');
   return root;
@@ -136,9 +150,13 @@ test('check-package requires every effective v1.1 methodology source', async (t)
   }
 });
 
-test('check-package requires native methodology modules, probes, and portable syntax launcher', async (t) => {
+test('check-package requires native methodology modules, Codex integration, probes, and portable syntax launcher', async (t) => {
   const root = await packageFixture(t, '# Harmless package audit\n');
   const required = [
+    'docs/codex-integration.md',
+    'src/codex-cli.js',
+    'src/codex-host.js',
+    'src/codex-extractor.js',
     'benchmark/lib/v11-native-attempts.mjs',
     'benchmark/lib/v11-native-attempt-evidence.mjs',
     'benchmark/lib/v11-native-attempt-evidence-loader.mjs',
@@ -267,4 +285,35 @@ test('check-package npm fallback safely packs metacharacter paths without DEP019
   // response: surface the upstream reason cleanly rather than crashing, hanging, or
   // leaking a path. Any OTHER failure still fails this test.
   assert.match(output, /npm pack command failed: [^\n]*URI malformed/u);
+});
+
+test('the credential detector decodes percent escapes as decodeURIComponent does, without waiting on its errors', async () => {
+  const { decodePercentEscapesLenient } = await import('../src/internal/credential-literal.js');
+  // The oracle: a run decoded whole when decodeURIComponent accepts it, else each escape that it accepts alone.
+  const oracle = (value) => value.replace(/(?:%[0-9A-Fa-f]{2})+/gu, (run) => {
+    try {
+      return decodeURIComponent(run);
+    } catch {
+      return run.replace(/%[0-9A-Fa-f]{2}/gu, (escape) => {
+        try {
+          return decodeURIComponent(escape);
+        } catch {
+          return escape;
+        }
+      });
+    }
+  });
+  const hex = (byte) => `%${byte.toString(16).padStart(2, '0')}`;
+  const seconds = [0x00, 0x41, 0x7f, 0x80, 0x8f, 0x90, 0x9f, 0xa0, 0xbf, 0xc0, 0xff];
+  for (let first = 0; first < 256; first += 1) {
+    for (const second of seconds) {
+      for (const tail of ['', '%80', '%bf', '%80%80', '%BF%bf', '%80%41', '%c3%a9']) {
+        const value = `a${hex(first)}${hex(second)}${tail}z`;
+        assert.equal(decodePercentEscapesLenient(value), oracle(value), value);
+      }
+    }
+  }
+  const started = Date.now();
+  decodePercentEscapesLenient('%C3'.repeat(100_000));
+  assert.ok(Date.now() - started < 500, `${Date.now() - started} ms`);
 });
