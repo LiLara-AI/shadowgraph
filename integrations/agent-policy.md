@@ -27,7 +27,7 @@ graph TD
         PF2 --> PF3{Review signals raised?}
         PF3 -- Yes --> PF4["Inspect signals:\nshadowgraph_review_signals(project)"]
         PF4 --> PF5["Acknowledge signal:\nshadowgraph_ack_review(reviewSignalId)"]
-        PF5 --> PF6["If condition invalidated:\nsupersede decision or adapt"]
+        PF5 --> PF6["If condition invalidated:\nsupersede decision or adapt\n(compact: record_decision with supersedes)"]
         PF3 -- No --> Complete([Turn Complete])
         PF6 --> Complete
     end
@@ -61,7 +61,7 @@ Rules that the server enforces, so do not attempt to work around them:
 
 ## During work
 
-1. Record a decision with its chosen approach, assumptions, evidence, and rejected alternatives.
+1. Record a decision with its chosen approach, assumptions, evidence, and rejected alternatives. When superseding an earlier decision in compact profile (`SHADOWGRAPH_MCP_COMPACT=1`), pass `supersedes: [predecessorId]` (or a string ID) directly on `shadowgraph_record_decision`; dedicated `shadowgraph_supersede` is available only in workflow and full profiles.
 2. Record each failed or informative attempt with explicit `resultClass`, reason, and environment.
 3. Record facts with provenance, verification status, expiry, and project.
 4. Use relationships to connect decisions, facts, attempts, and evidence.
@@ -70,8 +70,11 @@ Rules that the server enforces, so do not attempt to work around them:
 
 ## After work
 
-1. Record the outcome.
-2. Update the decision status.
+1. Record the outcome: call `shadowgraph_record_outcome`. In compact profile (`SHADOWGRAPH_MCP_COMPACT=1`), advance the decision lifecycle atomically in the same call by providing `decisionStatus` (e.g. `'validated'`, `'abandoned'`), `lifecycleStatus`, or `autoTransition: true`.
+2. Update the decision status:
+   - In compact profile (`SHADOWGRAPH_MCP_COMPACT=1`), use `shadowgraph_record_outcome` with `decisionStatus` (or `lifecycleStatus` / `autoTransition`). The dedicated `shadowgraph_update_status` tool is excluded from the compact profile.
+   - In full or workflow profiles (`SHADOWGRAPH_MCP_PROFILE=workflow` or unset), the dedicated `shadowgraph_update_status` tool is also available for direct status transitions.
+   - When superseding an invalidated decision in compact profile, call `shadowgraph_record_decision` with `supersedes: [predecessorId]`. Dedicated `shadowgraph_supersede` is available only in full and workflow profiles.
 3. Call `shadowgraph_maintain` when facts or time-sensitive conditions changed.
 4. Review and acknowledge open review signals as seen, not resolved; do not silently continue from a stale decision. `shadowgraph_context` is a read and persists no signal: call `shadowgraph_review_context` or `shadowgraph_review` to raise the signal ids that `shadowgraph_ack_review` takes.
 

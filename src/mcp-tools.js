@@ -1313,11 +1313,11 @@ const CATALOG = [
       type: 'object',
       ...creationIdPolicy,
       $defs: { jsonValue: jsonValueProperty },
-      required: ['solution', 'result', 'resultClass'],
+      required: ['solution', 'result'],
       properties: {
         solution: { type: 'string', description: 'What was tried. Required, non-empty, and searchable content.' },
-        result: { type: 'string', description: "What happened. Required, non-empty, and searchable content. Only legacy/core records without resultClass use wording such as failed, error, or regression to surface in shadowgraph_context failedAttempts; a captured attempt's wording is never read." },
-        resultClass: { type: 'string', enum: ['failed', 'succeeded', 'inconclusive'], description: 'Required for new MCP writes. Classify the result explicitly instead of leaving it to the legacy wording heuristic.' },
+        result: { type: 'string', description: "What happened. Required, non-empty, and searchable content. When resultClass is omitted, words such as failed, error, or regression surface the attempt in shadowgraph_context failedAttempts; a captured attempt's wording is never read." },
+        resultClass: { type: 'string', enum: ['failed', 'succeeded', 'inconclusive'], description: 'Optional classification: failed, succeeded, or inconclusive. Overrides wording-based failure detection when provided.' },
         task: { type: 'string', description: 'Task or problem context this attempt was trying to solve. Searchable content.' },
         tags: { type: 'array', items: { type: 'string' }, description: 'Free-form labels stored with the attempt. Searchable content.' },
         visibility: visibilityProperty,
@@ -2331,11 +2331,56 @@ export function buildToolCatalog({ verifier = false, embeddingConfigured = false
     })));
 }
 
+const COMPACT_ROUTE_OVERRIDES = Object.freeze({
+  shadowgraph_review: {
+    route: 'shadowgraph_reconsider audits verdicts; shadowgraph_review_context adds context; shadowgraph_ack_review closes one.'
+  },
+  shadowgraph_record_outcome: {
+    route: 'Use shadowgraph_record_decision to record choices; update decision lifecycle status directly via decisionStatus.'
+  },
+  shadowgraph_validate: {
+    route: 'shadowgraph_maintain ages records; shadowgraph_review checks decision rules; shadowgraph_reconsider audits verdicts.'
+  },
+  shadowgraph_ack_review: {
+    route: 'Pass reviewSignalId from shadowgraph_review or shadowgraph_review_context; update via shadowgraph_record_outcome(decisionStatus) or supersede via shadowgraph_record_decision(supersedes: [id]).'
+  }
+});
+
 export function selectTools(catalog, { compact = false, profile } = {}) {
   if (profile !== undefined && profile !== 'workflow') throw new Error('Unknown SHADOWGRAPH_MCP_PROFILE; supported value: workflow (or unset).');
   if (profile && compact) throw new Error('SHADOWGRAPH_MCP_PROFILE=workflow conflicts with SHADOWGRAPH_MCP_COMPACT=1; select one explicitly.');
   if (!compact && !profile) return Object.freeze([...catalog]);
   const included = (entry) => entry.compact || (profile === 'workflow' && WORKFLOW_ADDITIONS.has(entry.name));
+
+  if (compact) {
+    return Object.freeze(catalog.filter(included).map((entry) => {
+      const override = COMPACT_ROUTE_OVERRIDES[entry.name];
+      if (!override && entry.name !== 'shadowgraph_ack_review') return entry;
+      const describe = override ? Object.freeze({ ...entry.describe, ...override }) : entry.describe;
+      let inputSchema = entry.inputSchema;
+      if (entry.name === 'shadowgraph_ack_review' && inputSchema?.properties?.id) {
+        inputSchema = {
+          ...inputSchema,
+          properties: {
+            ...inputSchema.properties,
+            id: {
+              ...inputSchema.properties.id,
+              description: 'Persisted signal id: reviewSignalId from shadowgraph_review or shadowgraph_review_context. A fresh context evaluation can be unpersisted and have no ID. This is not the decisionId.'
+            }
+          }
+        };
+      }
+      return Object.freeze({
+        ...entry,
+        describe,
+        description: compose(describe),
+        inputSchema,
+        ...(entry.outputSchema ? { outputSchema: entry.outputSchema } : {})
+      });
+    }));
+  }
+
+  // Workflow profile handling (profile === 'workflow')
   const fullOnly = new Set(catalog.filter((entry) => !included(entry)).map((entry) => entry.name));
   return Object.freeze(catalog.filter(included).map((entry) => {
     let qualified = false;
@@ -2355,9 +2400,7 @@ export function selectTools(catalog, { compact = false, profile } = {}) {
     const inputSchema = schema(entry.inputSchema);
     const outputSchema = entry.outputSchema && schema(entry.outputSchema);
     if (!qualified) return entry;
-    describe.returns = [describe.returns, profile
-      ? 'For full-mode tools, ask the operator to unset SHADOWGRAPH_MCP_PROFILE and restart with SHADOWGRAPH_MCP_COMPACT=0.'
-      : 'For full-mode tools, ask the operator to restart with SHADOWGRAPH_MCP_COMPACT=0.'].filter(Boolean).join(' ');
+    describe.returns = [describe.returns, 'For full-mode tools, ask the operator to unset SHADOWGRAPH_MCP_PROFILE and restart with SHADOWGRAPH_MCP_COMPACT=0.'].filter(Boolean).join(' ');
     return Object.freeze({ ...entry, describe: Object.freeze(describe), description: compose(describe), inputSchema,
       ...(outputSchema ? { outputSchema } : {}) });
   }));

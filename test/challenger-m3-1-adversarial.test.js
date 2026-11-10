@@ -244,7 +244,7 @@ test('Feature 11: Valid domain errors remain actionable without leakage', async 
     decisionId: 'dec-nonexistent-123',
     outcome: { status: 'successful' }
   });
-  assert.equal(resDec.result.content[0].text, 'Tool execution failed (unknown_decision)');
+  assert.equal(resDec.result.content[0].text, 'Tool execution failed (unknown_decision): field "decisionId" refers to an unknown decision');
   assert.deepEqual(resDec.result._meta['shadowgraph/error'], {
     issueCode: 'unknown_decision', fieldPath: 'decisionId', retryable: false
   });

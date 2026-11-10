@@ -38,7 +38,7 @@ Modern complete results include `resultType: 'complete'` and server identity met
 
 ### Safe caller error details
 
-Phase 1 caller-corrective failures use the public message `Tool execution failed (<issueCode>)` and constructed details `{ issueCode, fieldPath, retryable: false }`. Legacy responses place that object in JSON-RPC `error.data`; modern `CallToolResult` responses place it in `result._meta['shadowgraph/error']`. Tagged missing-field details and allowlisted domain/recovery data use the same locations.
+Phase 1 caller-corrective failures include the offending `fieldPath` and actionable hints in the public message text: `Tool execution failed (<issueCode>): field "<fieldPath>" <hint>`, with constructed details `{ issueCode, fieldPath, retryable: false }`. Legacy responses place that object in JSON-RPC `error.data`; modern `CallToolResult` responses place it in `result._meta['shadowgraph/error']`. Tagged missing-field details and allowlisted domain/recovery data use the same locations.
 
 | Failure case | `issueCode` | `fieldPath` |
 | --- | --- | --- |
@@ -46,7 +46,7 @@ Phase 1 caller-corrective failures use the public message `Tool execution failed
 | Invalid decision status | `invalid_field` | `status` |
 | Invalid attempt result class | `invalid_field` | `resultClass` |
 | Illegal decision transition | `illegal_transition` | `status` |
-| Missing required field | `missing_required_field` | the required field, including `resultClass` |
+| Missing required field | `missing_required_field` | the required field |
 
 These five Phase 1 mappings emit four caller-error codes because `invalid_field` covers both invalid-value cases. Raw error messages, supplied values, filesystem paths, stacks, and internal diagnostic keys are not copied into these responses. `idempotency_conflict` arrives with Phase 2 and is not yet emitted.
 
@@ -149,8 +149,7 @@ sequenceDiagram
 `SHADOWGRAPH_MCP_COMPACT=1` must be passed to the server process, not merely assumed from the Inspector launch shell. The automated gate uses Inspector's server environment option and verifies the returned list count.
 
 Compact mode keeps the recording, recall, context/expansion, review/acknowledgement and
-maintenance workflow. Decision status changes, decision supersession, keyed confidence evidence,
-and stored-signal inspection also exist in the opt-in workflow profile below. Graph traversal and repair/recovery remain full-mode operations.
+maintenance workflow. In compact profile (`SHADOWGRAPH_MCP_COMPACT=1`), hosts complete the full decision lifecycle using `shadowgraph_record_outcome` with `decisionStatus` (for lifecycle transitions) and `shadowgraph_record_decision` with `supersedes` (for supersession). Dedicated tools (`shadowgraph_update_status`, `shadowgraph_supersede`), keyed confidence evidence (`shadowgraph_confidence_evidence`), and stored-signal inspection (`shadowgraph_review_signals`) exist in the opt-in workflow profile below and full mode. Graph traversal and repair/recovery remain full-mode operations.
 Their implementations and stored data are not removed. Descriptions qualify full-only references,
 including references inside parameter and output schemas.
 
@@ -182,7 +181,9 @@ Example: record a decision and its reopen conditions; evaluate with `review` or
 `reconsider`; inspect its evidence; record a replacement with `record_decision`;
 call `supersede` with the old and new returned IDs; then `ack_review` with the
 returned **signal** ID. For unchanged choices, `update_status` can make a legal
-lifecycle transition. Acknowledgement alone never changes a decision. After a
+lifecycle transition. (In compact profile, replace `supersede` with `record_decision`
+passing `supersedes: [oldId]`, and update lifecycle status directly via `record_outcome`
+with `decisionStatus`.) Acknowledgement alone never changes a decision. After a
 restart, `review_signals` can recover open work without creating new signals.
 
 This addresses the compact workflow gap; it does not alter compact clients or
@@ -538,7 +539,7 @@ Detail that used to sit in a description, kept here because it is worth having s
   attempt `reusableWhen` items accept legacy/symbolic strings and structured rules using stored facts.
   Structured rules require `key`/`value` or `target`/`expected`; explicit `null`, `false`, `0`, and
   empty-string operands are values, and an unresolved reuse condition blocks reuse.
-- `shadowgraph_record_attempt` requires `solution`, `result`, and `resultClass` for new MCP writes.
+- `shadowgraph_record_attempt` requires `solution` and `result`; `resultClass` is optional ('failed', 'succeeded', 'inconclusive'). When omitted, the result is categorized via wording heuristic.
 - `shadowgraph_record_fact` requires `key` and `value` and rejects `verificationStatus` of `verified`
   or `expired`: verification is not self-assertable and expiry belongs to `shadowgraph_maintain`.
   Writes for one key must arrive in non-decreasing `validFrom` order.
@@ -546,7 +547,7 @@ Detail that used to sit in a description, kept here because it is worth having s
   identical, and a `failed` outcome makes the decision due for review.
 - `shadowgraph_update_status` rejects an illegal move before any record, event, journal, or durable
   change. The legal moves are listed in its `status` property. Over MCP the failure arrives as
-  `Tool execution failed (illegal_transition)` with safe `status` details in the era-specific location
+  `Tool execution failed (illegal_transition): field "status" specifies an illegal status transition` with safe `status` details in the era-specific location
   above; the exact transition text remains available through the library and HTTP surfaces, where
   [the API reference](api-reference.md) lists it.
 - `shadowgraph_supersede` requires both decisions to exist, to differ, to share a project, and not to

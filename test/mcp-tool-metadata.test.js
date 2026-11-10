@@ -11,6 +11,7 @@ import assert from 'node:assert/strict';
 import {
   BATCH_PROTOCOL_VERSIONS,
   COMPACT_TOOL_NAMES,
+  WORKFLOW_TOOL_NAMES,
   LEGACY_PROTOCOL_VERSIONS,
   METADATA_TIER,
   OUTPUT_SCHEMA_OMISSIONS,
@@ -209,7 +210,7 @@ const INPUT_CONSTRAINTS_EXPECTED = {
   shadowgraph_revoke_grant: { required: ['accessId'], enums: {} },
   shadowgraph_discard_access: { required: ['accessId'], enums: {} },
   shadowgraph_record_decision: { required: ['title', 'chosen'], enums: {} },
-  shadowgraph_record_attempt: { required: ['solution', 'result', 'resultClass'], enums: {} },
+  shadowgraph_record_attempt: { required: ['solution', 'result'], enums: { resultClass: ['failed', 'succeeded', 'inconclusive'] } },
   shadowgraph_review: { required: null, enums: {} },
   shadowgraph_search: { required: null, enums: { kind: ['decision', 'attempt'] } },
   shadowgraph_context: { required: null, enums: {} },
@@ -330,12 +331,12 @@ test('the catalog advertises exactly the documented full, compact, and verifier 
   for (const entry of verifierCatalog) assert.match(entry.name, /^shadowgraph_[a-z_]+$/u);
 });
 
-test('write schemas require explicit attempt classes and advertise structured condition aliases', () => {
+test('write schemas require essential write fields and advertise structured condition aliases', () => {
   const decision = fullCatalog.find((tool) => tool.name === 'shadowgraph_record_decision');
   const attempt = fullCatalog.find((tool) => tool.name === 'shadowgraph_record_attempt');
   const fact = fullCatalog.find((tool) => tool.name === 'shadowgraph_record_fact');
 
-  assert.deepEqual(attempt.inputSchema.required, ['solution', 'result', 'resultClass']);
+  assert.deepEqual(attempt.inputSchema.required, ['solution', 'result']);
   assert.deepEqual(fact.inputSchema.required, ['key', 'value']);
   assert.deepEqual(decision.inputSchema.properties.alternatives.items.required, ['label']);
   for (const entry of [
@@ -449,13 +450,13 @@ const DESCRIPTION_CAP = 450;
 // repair_plan unlink boundary, and standardizes on 'review signals' (eliminating
 // 'reminders'). Measured with `node scripts/mcp-wire-size.mjs`: full 11,692,
 // compact 6,643, verifier full 12,041. All budgets are preserved with headroom.
-// PR61's restored guidance measures full 11,695, verifier 12,044, workflow 7,769,
-// compact 6,747; every existing description ceiling retains its headroom.
+// PR61's restored guidance measures full 11,695, verifier 12,044, workflow 7,769.
+// M3's clean compact routing measures compact 6,214; calibrated to 6,375 for ~2.5% headroom.
 const DESCRIPTION_TOTALS = {
   full: 11950,
   verifier: 12300,
   workflow: 7950,
-  compact: 6900
+  compact: 6375
 };
 // A tool whose result a caller could destroy something with has to say so in
 // its own words. The check is on meaning, not on a keyword: each of these must
@@ -668,6 +669,134 @@ test('overlapping tools route to their siblings by name, and every named sibling
       assert.ok(known.has(mentioned), `${entry.name} mentions unknown tool ${mentioned}`);
     }
   }
+});
+
+// --- Profile-Specific Route Verification (R2 / Milestone 3) -----------------
+const TOOL_NAME_REGEX = /\bshadowgraph_[a-z0-9_]+\b/gu;
+
+function collectProfileDanglingReferences(tools, allowedNames) {
+  const allowed = new Set(allowedNames);
+  const dangling = [];
+
+  for (const tool of tools) {
+    // 1. Scan composed tool description and describe segments
+    if (typeof tool.description === 'string') {
+      const descMatches = tool.description.match(TOOL_NAME_REGEX) ?? [];
+      for (const target of descMatches) {
+        if (!allowed.has(target)) {
+          dangling.push({ tool: tool.name, field: 'description', target });
+        }
+      }
+    }
+
+    if (tool.describe && typeof tool.describe === 'object') {
+      for (const [clause, text] of Object.entries(tool.describe)) {
+        if (typeof text === 'string') {
+          const clauseMatches = text.match(TOOL_NAME_REGEX) ?? [];
+          for (const target of clauseMatches) {
+            if (!allowed.has(target) && !dangling.some((d) => d.tool === tool.name && d.field === 'description' && d.target === target)) {
+              dangling.push({ tool: tool.name, field: `describe.${clause}`, target });
+            }
+          }
+        }
+      }
+    }
+
+    // 2. Scan inputSchema parameter descriptions recursively
+    walkProperties(tool.inputSchema, (name, property, path) => {
+      if (typeof property.description === 'string') {
+        const propMatches = property.description.match(TOOL_NAME_REGEX) ?? [];
+        for (const target of propMatches) {
+          if (!allowed.has(target)) {
+            dangling.push({ tool: tool.name, field: `${path}.description`, target });
+          }
+        }
+      }
+    });
+
+    // 3. Scan outputSchema parameter descriptions if present
+    if (tool.outputSchema) {
+      walkProperties(tool.outputSchema, (name, property, path) => {
+        if (typeof property.description === 'string') {
+          const outMatches = property.description.match(TOOL_NAME_REGEX) ?? [];
+          for (const target of outMatches) {
+            if (!allowed.has(target)) {
+              dangling.push({ tool: tool.name, field: `outputSchema.${path}.description`, target });
+            }
+          }
+        }
+      });
+    }
+
+    // 4. Fail-safe scan across complete serialized wire representation
+    const wireMatches = new Set(JSON.stringify(tool).match(TOOL_NAME_REGEX) ?? []);
+    for (const target of wireMatches) {
+      if (!allowed.has(target) && !dangling.some((d) => d.tool === tool.name && d.target === target)) {
+        dangling.push({ tool: tool.name, field: 'tool.wireJson', target });
+      }
+    }
+  }
+
+  return dangling;
+}
+
+test('advertised tools in compact profile reference only callable compact tools', () => {
+  const compact = selectTools(fullCatalog, { compact: true });
+  assert.equal(compact.length, 16, 'Compact profile must advertise exactly 16 tools');
+
+  const dangling = collectProfileDanglingReferences(compact, COMPACT_TOOL_NAMES);
+  assert.deepEqual(
+    dangling,
+    [],
+    `Compact profile advertises ${dangling.length} dangling tool reference(s) that a compact host cannot call:\n` +
+      dangling.map((d) => `  - [${d.tool}] at "${d.field}": references "${d.target}" (not callable in compact profile)`).join('\n') +
+      '\nAll advertised tool descriptions and parameter descriptions in the compact profile must only reference tools callable in that profile.'
+  );
+
+  // Verifier catalog under compact mode must also remain free of dangling references
+  const compactVerifier = selectTools(verifierCatalog, { compact: true });
+  const verifierDangling = collectProfileDanglingReferences(compactVerifier, COMPACT_TOOL_NAMES);
+  assert.deepEqual(verifierDangling, [], 'Compact profile with verifier catalog must not advertise dangling references');
+});
+
+test('advertised tools in workflow profile contain zero broken tool references', () => {
+  const workflow = selectTools(fullCatalog, { profile: 'workflow' });
+  assert.equal(workflow.length, 20, 'Workflow profile must advertise exactly 20 tools');
+
+  const known = new Set(FULL_TOOL_NAMES);
+  const workflowSet = new Set(WORKFLOW_TOOL_NAMES);
+  const broken = [];
+
+  for (const tool of workflow) {
+    const text = JSON.stringify(tool);
+    for (const match of text.match(TOOL_NAME_REGEX) ?? []) {
+      if (!known.has(match)) {
+        broken.push({ tool: tool.name, target: match, reason: 'unknown tool name' });
+      }
+    }
+    // Verify that any reference to a full-only tool is qualified with (full mode only)
+    if (typeof tool.description === 'string') {
+      for (const m of tool.description.matchAll(TOOL_NAME_REGEX)) {
+        const target = m[0];
+        if (!workflowSet.has(target)) {
+          const suffix = tool.description.slice(m.index + target.length);
+          if (!suffix.startsWith(' (full mode only)')) {
+            broken.push({ tool: tool.name, target, reason: 'unqualified full-only tool in workflow' });
+          }
+        }
+      }
+    }
+  }
+
+  assert.deepEqual(broken, [], 'Workflow profile must contain zero broken or unqualified tool references');
+});
+
+test('advertised tools in full and verifier catalogs contain zero broken tool references across all descriptions and schemas', () => {
+  const fullDangling = collectProfileDanglingReferences(fullCatalog, FULL_TOOL_NAMES);
+  assert.deepEqual(fullDangling, [], 'Full catalog contains broken tool references');
+
+  const verifierDangling = collectProfileDanglingReferences(verifierCatalog, verifierCatalog.map((t) => t.name));
+  assert.deepEqual(verifierDangling, [], 'Verifier catalog contains broken tool references');
 });
 
 test('every input property, at every nesting level, carries a meaningful description', () => {

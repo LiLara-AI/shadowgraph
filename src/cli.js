@@ -4,7 +4,7 @@ import { access, stat } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
 import { readExtractionAvailability } from './internal/extraction-availability.js';
-import { createStorage } from './storage.js';
+import { createStorage, isPlaceholderPath, resolveStoragePath } from './storage.js';
 import { createShadowGraph } from './shadowgraph.js';
 import { backupFile, restoreFile } from './backup.js';
 import { createRestoreValidator } from './restore-validation.js';
@@ -141,7 +141,7 @@ if (argsFlagIndex !== -1 && argsFlagIndex + 1 < rest.length) {
   input = rest.join(' ');
 }
 const storageType = process.env.SHADOWGRAPH_STORAGE ?? 'json';
-const file = resolve(process.env.SHADOWGRAPH_FILE ?? './.shadowgraph/data.json');
+const file = resolve(resolveStoragePath(process.env.SHADOWGRAPH_FILE, { type: storageType, preferLocal: !process.env.SHADOWGRAPH_FILE }));
 
 function assertStorageType() {
   if (!['json', 'sqlite'].includes(storageType)) {
@@ -503,12 +503,20 @@ async function runOneShot() {
       const graphValid = validation.valid === true;
       // Which store the activated hooks read; a different one here is legitimate (a per-project MCP store) but never implied.
       const hooks = await hookStores();
+      const placeholderConfigured = (typeof process.env.SHADOWGRAPH_FILE === 'string' && isPlaceholderPath(process.env.SHADOWGRAPH_FILE))
+        ? process.env.SHADOWGRAPH_FILE.trim()
+        : null;
       return {
         ok: nodeSupported && graphValid && storageDiagnostics?.valid !== false,
         command: 'doctor',
         version: VERSION,
         node: { version: process.versions.node, supported: nodeSupported, requirement: '>=20' },
         storage: { type: storageType, path: file, initialized: true, readable: true, writable: true,
+          ...(placeholderConfigured ? {
+            placeholder: placeholderConfigured,
+            fallbackPath: file,
+            warning: `Configured SHADOWGRAPH_FILE "${placeholderConfigured}" is a template placeholder; using fallback storage at "${file}".`
+          } : {}),
           ...(storageDiagnostics?.issues?.length ? { diagnostics: storageDiagnostics } : {}) },
         graph: { valid: graphValid, issues: validation.issues?.length ?? 0, completeness: validation.completeness, limitation: validation.limitation },
         hooks: hooks.stores.length ? { activeStore: hooks.stores[0].file, sameStore: !hooks.other } : { activeStore: null },

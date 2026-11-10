@@ -425,7 +425,7 @@ test('a legacy tool-execution failure stays a protocol error and carries no stru
   const failed = await rpc.call('tools/call', { name: 'shadowgraph_confidence_evidence', arguments: { project: 'conformance', decisionId: 'missing', reason: 'r', key: 'k' } });
   assert.equal(failed.result, undefined);
   assert.equal(failed.error.code, -32000);
-  assert.equal(failed.error.message, 'Tool execution failed (unknown_decision)');
+  assert.equal(failed.error.message, 'Tool execution failed (unknown_decision): field "decisionId" refers to an unknown decision');
   assert.deepEqual(failed.error.data, { issueCode: 'unknown_decision', fieldPath: 'decisionId', retryable: false });
   assert.equal(JSON.stringify(failed).includes('missing'), false);
 });

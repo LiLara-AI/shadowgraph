@@ -9,14 +9,16 @@ ShadowGraph is a local decision ledger and unified memory kernel for AI agents. 
 
 The package remains `private: true` and is not published to the npm registry. Install the GitHub Technical Preview as the [main README](../README.md#1-install) describes, or use its pinned GitHub source tag:
 
-Choose one shared absolute store path before setup:
+Choose setup options:
 
 ```bash
 npm install --global github:LiLara-AI/shadowgraph#v0.43.1
-export SHADOWGRAPH_FILE=/absolute/path/to/shared-shadowgraph/data.json
 shadowgraph setup
 shadowgraph doctor
 ```
+
+By default, ShadowGraph uses unified user-home storage (`~/.shadowgraph/data.json`).
+`SHADOWGRAPH_FILE` is an optional override. If shared multi-agent storage or a custom path is desired across multiple agents or tools, set `SHADOWGRAPH_FILE` to a real absolute path (e.g. `C:\shadowgraph\data.json` on Windows or `/shared/shadowgraph/data.json` on POSIX). If `SHADOWGRAPH_FILE` is omitted or contains an unreplaced placeholder, ShadowGraph safely falls back to default user-home storage (`~/.shadowgraph/data.json`).
 
 Use `github:LiLara-AI/shadowgraph#v0.43.1` for the 0.43.1 Technical Preview; without the tag you get `main`. Read the [upgrade and rollback guide](../docs/migration.md) before switching versions.
 
@@ -24,16 +26,18 @@ The global install makes the `shadowgraph` binary available to GUI clients that 
 
 All templates recommend `SHADOWGRAPH_MCP_COMPACT=1`: 16 workflow tools with the same full-fidelity stored graph. To use all 35 tools, remove that environment variable or set it to `0`; compact mode is a tool-advertisement choice, not lossy storage.
 
-Every stdio registration below uses `SHADOWGRAPH_FILE=/absolute/path/to/shared-shadowgraph/data.json`. On Windows, substitute a native absolute path such as `C:\shadowgraph\data.json`. The other explicit choice is project-local `.shadowgraph/data.json`: remove `SHADOWGRAPH_FILE` and launch the client in that project directory. Later clients must use the same path and project; ShadowGraph never moves or merges stores.
+The standard client registrations below omit `SHADOWGRAPH_FILE` by default, using safe unified user-home storage (`~/.shadowgraph/data.json`). If you want to use a shared custom store across clients, set `SHADOWGRAPH_FILE` explicitly to an absolute path on your filesystem (such as `C:\shadowgraph\data.json` on Windows or `/shared/shadowgraph/data.json` on POSIX). The other explicit choice is project-local `.shadowgraph/data.json`: launch the client in that project directory without setting `SHADOWGRAPH_FILE`. Later clients must use the same path and project; ShadowGraph never moves or merges stores.
 
 ## Claude Code
 
 Copy-ready CLI registration at user scope:
 
 ```bash
-claude mcp add --scope user --env SHADOWGRAPH_MCP_COMPACT=1 --env SHADOWGRAPH_FILE=/absolute/path/to/shared-shadowgraph/data.json --transport stdio shadowgraph -- shadowgraph mcp
+claude mcp add --scope user --env SHADOWGRAPH_MCP_COMPACT=1 --transport stdio shadowgraph -- shadowgraph mcp
 claude mcp list
 ```
+
+To configure a shared custom store across tools, add `--env SHADOWGRAPH_FILE=<absolute-path-to-data.json>`.
 
 Or copy `claude-code.mcp.json` to a project `.mcp.json`:
 
@@ -45,8 +49,7 @@ Or copy `claude-code.mcp.json` to a project `.mcp.json`:
       "command": "shadowgraph",
       "args": ["mcp"],
       "env": {
-        "SHADOWGRAPH_MCP_COMPACT": "1",
-        "SHADOWGRAPH_FILE": "/absolute/path/to/shared-shadowgraph/data.json"
+        "SHADOWGRAPH_MCP_COMPACT": "1"
       }
     }
   }
@@ -69,10 +72,10 @@ Both change `~/.claude/settings.json` (or the file `--settings` names, followed 
 Activation is a separate, logged step after its gate, naming the one store the hook will read:
 
 ```bash
-shadowgraph activate delivery --evidence <gate-receipt> --store /absolute/path/to/data.json
+shadowgraph activate delivery --evidence <gate-receipt> --store <path-to-data.json>
 ```
 
-Only a project whose worktree binding that store has also recorded (`shadowgraph bind`, worktree type) is delivered, so a repository's own `.shadowgraph` files never choose what reaches the model. The hook reads that one store only: memory recorded in any other store, such as the project-local `.shadowgraph/data.json` the MCP server uses when `SHADOWGRAPH_FILE` is not set, is not delivered. So point the MCP server and `shadowgraph bind` at the same store (the same absolute `SHADOWGRAPH_FILE`) before activating. While delivery or capture is active, `bind` refuses any other store before opening one (`binding_store_not_active`, naming the active store), and `doctor` reports the store the hooks read (`hooks.activeStore`) and whether it is the one it checked (`hooks.sameStore`). To turn delivery off, **deactivate first, then uninstall**: `shadowgraph deactivate delivery` silences every hook at once, including those running sessions still hold, and `shadowgraph uninstall-hooks` then removes the block. Run `deactivate` with the `SHADOWGRAPH_HOME` Claude Code's hooks see (by default none, so `~/.shadowgraph`), and check the record path it prints. Remove the hooks before uninstalling ShadowGraph, since each hook otherwise runs a command that no longer exists.
+Only a project whose worktree binding that store has also recorded (`shadowgraph bind`, worktree type) is delivered, so a repository's own `.shadowgraph` files never choose what reaches the model. The hook reads that one store only: memory recorded in any other store, such as the project-local `.shadowgraph/data.json` the MCP server uses when `SHADOWGRAPH_FILE` is not set, is not delivered. So point the MCP server and `shadowgraph bind` at the same store (the same absolute `SHADOWGRAPH_FILE` if configured, or default user-home storage) before activating. While delivery or capture is active, `bind` refuses any other store before opening one (`binding_store_not_active`, naming the active store), and `doctor` reports the store the hooks read (`hooks.activeStore`) and whether it is the one it checked (`hooks.sameStore`). To turn delivery off, **deactivate first, then uninstall**: `shadowgraph deactivate delivery` silences every hook at once, including those running sessions still hold, and `shadowgraph uninstall-hooks` then removes the block. Run `deactivate` with the `SHADOWGRAPH_HOME` Claude Code's hooks see (by default none, so `~/.shadowgraph`), and check the record path it prints. Remove the hooks before uninstalling ShadowGraph, since each hook otherwise runs a command that no longer exists.
 
 For a fixed build rather than whatever `shadowgraph` is on the path, `node scripts/install-runtime.mjs` installs a commit's packed build under `~/.shadowgraph/runtime/<commit>/`, and `install-hooks --runtime <directory>` and `activate delivery --runtime <directory>` name it.
 
@@ -94,13 +97,14 @@ Copy `cursor.mcp.json` to project `.cursor/mcp.json` or user `~/.cursor/mcp.json
       "command": "shadowgraph",
       "args": ["mcp"],
       "env": {
-        "SHADOWGRAPH_MCP_COMPACT": "1",
-        "SHADOWGRAPH_FILE": "/absolute/path/to/shared-shadowgraph/data.json"
+        "SHADOWGRAPH_MCP_COMPACT": "1"
       }
     }
   }
 }
 ```
+
+To configure a custom shared store, add `"SHADOWGRAPH_FILE": "<absolute-path-to-data.json>"` to `env`.
 
 Enable the server in **Cursor Settings → MCP**, then restart/reload the client if it was already open.
 
@@ -109,9 +113,11 @@ Enable the server in **Cursor Settings → MCP**, then restart/reload the client
 Copy-ready CLI registration:
 
 ```bash
-codex mcp add shadowgraph --env SHADOWGRAPH_MCP_COMPACT=1 --env SHADOWGRAPH_FILE=/absolute/path/to/shared-shadowgraph/data.json -- shadowgraph mcp
+codex mcp add shadowgraph --env SHADOWGRAPH_MCP_COMPACT=1 -- shadowgraph mcp
 codex mcp list
 ```
+
+To configure a shared custom store, add `--env SHADOWGRAPH_FILE=<absolute-path-to-data.json>`.
 
 Or append `codex.mcp.toml` to `~/.codex/config.toml` (or a trusted project's `.codex/config.toml`):
 
@@ -123,7 +129,6 @@ startup_timeout_sec = 30
 
 [mcp_servers.shadowgraph.env]
 SHADOWGRAPH_MCP_COMPACT = "1"
-SHADOWGRAPH_FILE = "/absolute/path/to/shared-shadowgraph/data.json"
 ```
 
 Restart Codex CLI/IDE after changing `config.toml`.
@@ -133,8 +138,10 @@ Restart Codex CLI/IDE after changing `config.toml`.
 Prefer the CLI so Hermes writes valid configuration itself:
 
 ```bash
-hermes mcp add shadowgraph --command shadowgraph --connect-timeout 30 --env SHADOWGRAPH_MCP_COMPACT=1 --env SHADOWGRAPH_FILE=/absolute/path/to/shared-shadowgraph/data.json --args mcp
+hermes mcp add shadowgraph --command shadowgraph --connect-timeout 30 --env SHADOWGRAPH_MCP_COMPACT=1 --args mcp
 ```
+
+To configure a shared custom store, add `--env SHADOWGRAPH_FILE=<absolute-path-to-data.json>`.
 
 The resulting `mcp_servers` entry (also in `hermes.mcp.yaml`) is:
 
@@ -145,7 +152,6 @@ mcp_servers:
     args: ["mcp"]
     env:
       SHADOWGRAPH_MCP_COMPACT: "1"
-      SHADOWGRAPH_FILE: "/absolute/path/to/shared-shadowgraph/data.json"
     connect_timeout: 30
 ```
 
@@ -170,7 +176,10 @@ Run the local API with `shadowgraph serve`. The dashboard is served only from `h
 ```text
 Before work: context + recall/retrieve.
 During work: record decisions, evidence, alternatives, scoped memory, facts, attempts, and links.
+             (In compact profile, supersede an earlier choice via shadowgraph_record_decision with `supersedes`).
 After work: record outcome and status.
+            (In compact profile, update decision status via shadowgraph_record_outcome with `decisionStatus`;
+             dedicated shadowgraph_update_status and shadowgraph_supersede are available in workflow/full profiles).
 When conditions change: persist the changed fact, restart if needed, then review stored state.
 ```
 

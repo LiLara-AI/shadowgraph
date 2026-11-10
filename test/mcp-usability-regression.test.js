@@ -131,13 +131,17 @@ test('usability regression: profile boundary dead-end resolution for shadowgraph
   assert.match(workflowValidate.description, /shadowgraph_rebuild \(full mode only\)/i);
   assert.match(workflowValidate.description, /ask the operator to unset SHADOWGRAPH_MCP_PROFILE and restart with SHADOWGRAPH_MCP_COMPACT=0/i);
 
-  // In Compact mode, absent tools are also qualified and restart guidance is appended
+  // In Compact mode, absent tools are not mentioned; descriptions route cleanly with zero dangling references
   const compactCatalog = selectTools(catalog, { compact: true });
   const compactValidate = compactCatalog.find((t) => t.name === 'shadowgraph_validate');
   assert.ok(compactValidate, 'shadowgraph_validate exists in compact profile');
-  assert.match(compactValidate.description, /shadowgraph_repair_plan \(full mode only\)/i);
-  assert.match(compactValidate.description, /shadowgraph_rebuild \(full mode only\)/i);
-  assert.match(compactValidate.description, /ask the operator to restart with SHADOWGRAPH_MCP_COMPACT=0/i);
+  assert.doesNotMatch(compactValidate.description, /shadowgraph_repair_plan/i);
+  assert.doesNotMatch(compactValidate.description, /shadowgraph_rebuild/i);
+  assert.doesNotMatch(compactValidate.description, /full mode only/i);
+  assert.doesNotMatch(compactValidate.description, /ask the operator to restart/i);
+  assert.match(compactValidate.description, /shadowgraph_maintain/i);
+  assert.match(compactValidate.description, /shadowgraph_review/i);
+  assert.match(compactValidate.description, /shadowgraph_reconsider/i);
 });
 
 test('usability regression: complete elimination of "reminder" terminology across entire catalog and SERVER_INSTRUCTIONS', () => {

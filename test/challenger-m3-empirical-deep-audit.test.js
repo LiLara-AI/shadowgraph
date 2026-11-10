@@ -262,7 +262,7 @@ test('Deep Audit 3: UNC network paths and backslash path traversals are masked w
     });
     const parsedRec = parseToolResult(recRes);
     const recMessage = typeof parsedRec === 'string' ? parsedRec : recRes.error?.message ?? recRes.result?.content?.[0]?.text;
-    assert.equal(recMessage, 'Tool execution failed (invalid_field)',
+    assert.equal(recMessage, 'Tool execution failed (invalid_field): field "status" must be one of: proposed, planned, in_progress, executed, validated, failed, reconsidered, abandoned, archived',
       `Adversarial record status "${status}" must return only the safe invalid_field code`);
     assert.deepEqual(recRes.result._meta['shadowgraph/error'], {
       issueCode: 'invalid_field', fieldPath: 'status', retryable: false
@@ -278,7 +278,7 @@ test('Deep Audit 3: UNC network paths and backslash path traversals are masked w
     });
     const parsedUpdate = parseToolResult(updateRes);
     const updateMessage = typeof parsedUpdate === 'string' ? parsedUpdate : updateRes.error?.message ?? updateRes.result?.content?.[0]?.text;
-    assert.equal(updateMessage, 'Tool execution failed (invalid_field)',
+    assert.equal(updateMessage, 'Tool execution failed (invalid_field): field "status" must be one of: proposed, planned, in_progress, executed, validated, failed, reconsidered, abandoned, archived',
       `Adversarial update status "${status}" must return only the safe invalid_field code`);
     assert.deepEqual(updateRes.result._meta['shadowgraph/error'], {
       issueCode: 'invalid_field', fieldPath: 'status', retryable: false
@@ -296,7 +296,7 @@ test('Deep Audit 3: UNC network paths and backslash path traversals are masked w
   });
   const validParsed = parseToolResult(validDomainErrorRes);
   const validMessage = typeof validParsed === 'string' ? validParsed : validDomainErrorRes.result?.content?.[0]?.text;
-  assert.equal(validMessage, 'Tool execution failed (invalid_field)');
+  assert.equal(validMessage, 'Tool execution failed (invalid_field): field "status" must be one of: proposed, planned, in_progress, executed, validated, failed, reconsidered, abandoned, archived');
   assert.deepEqual(validDomainErrorRes.result._meta['shadowgraph/error'], {
     issueCode: 'invalid_field', fieldPath: 'status', retryable: false
   });
@@ -309,7 +309,7 @@ test('Deep Audit 3: UNC network paths and backslash path traversals are masked w
   });
   const validUpdateParsed = parseToolResult(validUpdateErrorRes);
   const validUpdateMessage = typeof validUpdateParsed === 'string' ? validUpdateParsed : validUpdateErrorRes.result?.content?.[0]?.text;
-  assert.equal(validUpdateMessage, 'Tool execution failed (invalid_field)');
+  assert.equal(validUpdateMessage, 'Tool execution failed (invalid_field): field "status" must be one of: proposed, planned, in_progress, executed, validated, failed, reconsidered, abandoned, archived');
   assert.deepEqual(validUpdateErrorRes.result._meta['shadowgraph/error'], {
     issueCode: 'invalid_field', fieldPath: 'status', retryable: false
   });

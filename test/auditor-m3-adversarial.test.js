@@ -172,7 +172,7 @@ test('Auditor Adversarial 1: Error masking preserves domain validation messages 
     project: 'auditor-p1'
   });
   const err5 = res5.result?.isError ? res5.result.content[0].text : res5.error?.message;
-  assert.equal(err5, 'Tool execution failed (invalid_field)');
+  assert.equal(err5, 'Tool execution failed (invalid_field): field "status" must be one of: proposed, planned, in_progress, executed, validated, failed, reconsidered, abandoned, archived');
   assert.deepEqual(res5.result._meta['shadowgraph/error'], {
     issueCode: 'invalid_field', fieldPath: 'status', retryable: false
   });
@@ -184,7 +184,7 @@ test('Auditor Adversarial 1: Error masking preserves domain validation messages 
     project: 'auditor-p1'
   });
   const err6 = res6.result?.isError ? res6.result.content[0].text : res6.error?.message;
-  assert.equal(err6, 'Tool execution failed (unknown_decision)');
+  assert.equal(err6, 'Tool execution failed (unknown_decision): field "decisionId" refers to an unknown decision');
   assert.deepEqual(res6.result._meta['shadowgraph/error'], {
     issueCode: 'unknown_decision', fieldPath: 'decisionId', retryable: false
   });
