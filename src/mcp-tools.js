@@ -806,16 +806,16 @@ const readProvenanceSchema = { type: 'object', description: 'Original read bound
 } };
 const GRANT_READ_TOOLS = new Set(['shadowgraph_review', 'shadowgraph_search', 'shadowgraph_context', 'shadowgraph_review_context', 'shadowgraph_recall', 'shadowgraph_traverse', 'shadowgraph_expand', 'shadowgraph_redact', 'shadowgraph_maintain', 'shadowgraph_retrieve', 'shadowgraph_validate', 'shadowgraph_journal', 'shadowgraph_rebuild', 'shadowgraph_review_signals', 'shadowgraph_repair_plan', 'shadowgraph_reconsider']);
 const ACCESS_DESCRIPTIONS = {
-  shadowgraph_review: {"does": "Evaluate open project decisions against current facts, persist due review signals, and return due decisions as { items, completeness }.", "route": "Use shadowgraph_review_signals to inspect the saved signal queue without re-running rule evaluation.", "effects": "Skips closed decisions. Saves owned signals deduped by decision/reason/coverage and commits a revision; grants widen reads only; no status changes.", "returns": ""},
-  shadowgraph_search: {"does": "Match records containing every literal query term as direct content matches. Queries match Arabic stem forms across decision, attempt, and fact fields.", "route": "Use shadowgraph_recall when ranking scoped memories (shadowgraph_recall ranks by vector and recency).", "returns": "\"a b\" requires both terms, not an exact phrase; matchMode allows 3+ terms fallback; empty query filters.", "effects": "Own-scope read saves nothing; an access key commits a revision and audit."},
-  shadowgraph_context: {"does": "Read a read-only session startup working set: activeDecisions, staleAssumptions, failedAttempts, belowConfidenceThreshold, and task digest.", "route": "shadowgraph_expand dereferences compact:true line handles; shadowgraph_review_context persists review signals.", "effects": "No decision or signal writes; unmatched-query diagnostics stay in memory until the next save. Own-scope read saves nothing; an access key commits a revision and audit."},
-  shadowgraph_review_context: {"does": "Load the turn check-in working set (activeDecisions, openReviews, suggestedQuestions) with synchronized reviewSignalId handles.", "route": "shadowgraph_context saves no signals; shadowgraph_review also persists signals for due items only.", "effects": "Skips closed decisions. Deduplicates owned signals by decision/reason/coverage and commits a revision; grants widen reads only (unpersisted); no status changes."},
-  shadowgraph_recall: {"does": "Rank relevant scoped memory (userId, agentId, runId, memoryType) by fused lexical, vector, graph and temporal RRF signals.", "route": "Write scoped memories first with shadowgraph_remember.", "returns": "Returns scores and available signals; no provider/vector means no semantic ranking. Omitted memory scope fields select null, not any user/run.", "effects": "Own-scope read saves nothing; an access key commits a revision and audit."},
-  shadowgraph_maintain: {"does": "Age overdue owned decisions past reviewAfter to stale and expire owned facts past expiresAt against now.", "route": "Use shadowgraph_validate for read-only integrity checks; Maintenance does not repair or restore.", "effects": "Compares reviewAfter and expiresAt to now and commits status transitions on repeats; accessId widens reads only.", "returns": "Returns { at, staleDecisionIds, agedDecisionIds, reviewSignals, due }."},
+  shadowgraph_review: {"does": "Evaluate open project decisions against current facts, persist due review signals, and return { items, completeness }.", "route": "Use shadowgraph_review_signals to inspect the saved signal queue, shadowgraph_review_context for check-in, or shadowgraph_ack_review to close.", "effects": "Skips closed decisions. Saves owned signals deduped by decision/reason/coverage and commits a revision; grants widen reads; no status changes.", "returns": ""},
+  shadowgraph_search: {"does": "Match records containing every literal query term as direct content matches. Supports Arabic stemming across records.", "route": "Use shadowgraph_retrieve for graph neighbours, or shadowgraph_recall for ranked memory (shadowgraph_recall ranks by vector).", "returns": "\"a b\" requires both terms, not an exact phrase; matchMode:\"partial\" gives 3+ terms fallback; empty query filters.", "effects": "Own-scope read saves nothing; an access key commits a revision and audit."},
+  shadowgraph_context: {"does": "Read a read-only session startup working set: activeDecisions, staleAssumptions, failedAttempts, belowConfidenceThreshold, and task digest.", "route": "shadowgraph_expand dereferences compact:true handles; shadowgraph_review_context persists review signals; shadowgraph_search queries records.", "effects": "No decision or signal writes; asOf scopes relevant items. Own-scope read saves nothing; an access key commits a revision and audit."},
+  shadowgraph_review_context: {"does": "Load the turn check-in working set (activeDecisions, openReviews, suggestedQuestions) with synchronized reviewSignalId handles.", "route": "Use when check-in must persist signals; shadowgraph_context saves no signals; shadowgraph_review checks due items only.", "effects": "Skips closed decisions. Deduplicates owned signals by decision/reason/coverage and commits a revision storing signals; grants widen reads; no status changes."},
+  shadowgraph_recall: {"does": "Rank relevant scoped memory (userId, agentId, runId, memoryType) by fused lexical, vector, graph and temporal RRF signals.", "route": "Write scoped memories first with shadowgraph_remember; use shadowgraph_search for unranked keyword matches.", "returns": "Returns scores and available signals; no provider/vector means no semantic ranking. Omitted memory scope fields select null, not any user/run.", "effects": "Own-scope read saves nothing; an access key commits a revision and audit."},
+  shadowgraph_maintain: {"does": "Age overdue owned decisions past reviewAfter to stale and expire owned facts past expiresAt against now.", "route": "Use shadowgraph_validate for integrity checks or shadowgraph_review for rules; Maintenance does not repair or restore.", "effects": "Mutates owned records only; repeat runs commit a revision without re-aging; accessId widens reads only.", "returns": ""},
   shadowgraph_retrieve: {"does": "Retrieve seed records matching every query term plus their ordered graph neighbours. Queries match Arabic stem forms.", "route": "Use shadowgraph_search for flat keyword hits without graph neighbours, or shadowgraph_recall when ranking memories (shadowgraph_recall ranks by vector).", "returns": "Every term must match a seed; neighbours need not match, and matchMode allows 3+ terms fallback on seeds.", "effects": "Own-scope read saves nothing; an access key commits a revision and audit."},
-  shadowgraph_expand: {"does": "Expand a recordId and revision digest handle as input to fetch its full current record (T2) and counterpart investigation.", "route": "shadowgraph_context supplies the handle; pass recordId, digest and flattened scope fields at top level.", "returns": "Returns record, status and counterparts. Stale digest yields revision_changed; purged yields purged; missing or out-of-scope yields unavailable.", "effects": "Own-scope read saves nothing; an access key commits a revision and audit."},
+  shadowgraph_expand: {"does": "Expand a recordId and revision digest handle from shadowgraph_context into the full current record and rival records.", "route": "shadowgraph_context supplies the handle; use shadowgraph_search or shadowgraph_retrieve for text queries.", "returns": "Flatten scope to top level. Stale digest yields revision_changed; purged yields purged; missing or out-of-scope yields unavailable.", "effects": "Own-scope read saves nothing; an access key commits a revision and audit."},
   shadowgraph_validate: {"does": "Diagnose record, graph and journal integrity without applying repairs.", "route": "shadowgraph_maintain ages records; shadowgraph_review checks decision rules; shadowgraph_repair_plan proposes repairs; shadowgraph_rebuild checks journal replay.", "effects": "Own-scope read saves nothing; an access key commits a revision and audit."},
-  shadowgraph_reconsider: {"does": "Audit one decision by decisionId (or project): explain all reopen verdicts (grounded, contested, unevaluated).", "route": "Use shadowgraph_supersede to replace a decision when an audited alternative wins.", "effects": "Rejects unknown, out-of-scope or closed decisionId. Commits an audit revision without changing decision status; grants widen reads only.", "returns": "review_recommended: condition fired; manual_review: unresolved evidence; unchanged: complete, no trigger."},
+  shadowgraph_reconsider: {"does": "Audit one decision by decisionId (or project): explain all reopen verdicts (grounded, contested, unevaluated).", "route": "Use shadowgraph_review to queue signals, or shadowgraph_supersede to replace it.", "effects": "Rejects unknown, out-of-scope or closed decisionId. Commits an audit revision without changing decision status; grants widen reads only.", "returns": "review_recommended: condition fired; manual_review: unresolved evidence; unchanged: complete, no trigger."},
 };
 
 function compose({ does, route, effects, returns }) {
@@ -1305,9 +1305,9 @@ const CATALOG = [
     persists: true,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     describe: {
-      does: 'Record one attempt with its result; returns the stored attempt.',
-      route: 'Use shadowgraph_record_decision for a choice; shadowgraph_record_outcome updates an existing decision and its confidence. An attempt is a separate record.',
-      effects: 'Appends an attempt and journal entry and commits a revision; idempotencyKey prevents duplicate retries. resultClass overrides wording-based failure classification.'
+      does: 'Record one attempt with its solution and result, returning the stored attempt.',
+      route: 'Use shadowgraph_record_decision for a choice, shadowgraph_record_outcome to update a decision, or shadowgraph_record_fact for an observation.',
+      effects: 'Appends an attempt and journal entry and commits a revision; idempotencyKey deduplicates retries (conflicts error); resultClass overrides wording.'
     },
     inputSchema: {
       type: 'object',
@@ -1339,8 +1339,8 @@ const CATALOG = [
     persists: true,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     describe: {
-      does: 'Evaluate open project decisions against current facts, persist due review signals, and return due decisions as { items, completeness }.',
-      route: 'Use shadowgraph_review_signals to inspect the saved signal queue without re-running rule evaluation.',
+      does: 'Evaluate open project decisions against current facts, persist due review signals, and return { items, completeness }.',
+      route: 'Use shadowgraph_review_signals to inspect the saved signal queue, shadowgraph_review_context for check-in, or shadowgraph_ack_review to close.',
       effects: 'Skips closed decisions. Saves owned signals deduped by decision/reason/coverage and commits a revision; no status changes.',
       returns: ''
     },
@@ -1360,10 +1360,10 @@ const CATALOG = [
     persists: false,
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     describe: {
-      does: 'Match records containing every literal query term as direct content matches. Queries match Arabic stem forms across decision, attempt, and fact fields.',
-      route: 'Use shadowgraph_recall when ranking scoped memories (shadowgraph_recall ranks by vector and recency).',
+      does: 'Match records containing every literal query term as direct content matches. Supports Arabic stemming across records.',
+      route: 'Use shadowgraph_retrieve for graph neighbours, or shadowgraph_recall for ranked memory (shadowgraph_recall ranks by vector).',
       effects: 'Reads only. Schema keys never match, and a filter is never a content match.',
-      returns: '"a b" requires both terms, not an exact phrase; matchMode allows 3+ terms fallback; empty query filters.'
+      returns: '"a b" requires both terms, not an exact phrase; matchMode:"partial" gives 3+ terms fallback; empty query filters.'
     },
     inputSchema: {
       type: 'object',
@@ -1388,8 +1388,8 @@ const CATALOG = [
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     describe: {
       does: 'Read a read-only session startup working set: activeDecisions, staleAssumptions, failedAttempts, belowConfidenceThreshold, and task digest.',
-      route: 'shadowgraph_expand dereferences compact:true line handles; shadowgraph_review_context persists review signals.',
-      effects: 'No decision or signal writes; unmatched-query diagnostics stay in memory until the next save.'
+      route: 'shadowgraph_expand dereferences compact:true handles; shadowgraph_review_context persists review signals; shadowgraph_search queries records.',
+      effects: 'No decision or signal writes; asOf scopes relevant items.'
     },
     inputSchema: defaultContextInputSchema,
     outputSchema: contextOutputSchema
@@ -1401,8 +1401,8 @@ const CATALOG = [
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     describe: {
       does: 'Load the turn check-in working set (activeDecisions, openReviews, suggestedQuestions) with synchronized reviewSignalId handles.',
-      route: 'shadowgraph_context saves no signals; shadowgraph_review also persists signals for due items only.',
-      effects: 'Skips closed decisions. Deduplicates owned signals by decision/reason/coverage and commits a revision; no status changes.'
+      route: 'Use when check-in must persist signals; shadowgraph_context saves no signals; shadowgraph_review checks due items only.',
+      effects: 'Skips closed decisions. Deduplicates owned signals by decision/reason/coverage and commits a revision storing signals; no status changes.'
     },
     inputSchema: contextInputSchema,
     outputSchema: reviewContextOutputSchema
@@ -1499,7 +1499,7 @@ const CATALOG = [
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     describe: {
       does: 'Rank relevant scoped memory (userId, agentId, runId, memoryType) by fused lexical, vector, graph and temporal RRF signals.',
-      route: 'Write scoped memories first with shadowgraph_remember.',
+      route: 'Write scoped memories first with shadowgraph_remember; use shadowgraph_search for unranked keyword matches.',
       effects: 'Reads only. Every response declares which signals were available, so absent ones are never renamed.',
       returns: 'Returns scores and available signals; no provider/vector means no semantic ranking. Omitted memory scope fields select null, not any user/run.'
     },
@@ -1573,8 +1573,8 @@ const CATALOG = [
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
     describe: {
       does: 'Record what happened to an existing decision and update its evidence-weighted confidence.',
-      route: 'shadowgraph_confidence_evidence records evidence; shadowgraph_update_status changes the lifecycle state.',
-      effects: 'One outcome per decision: re-recording replaces it, updates timestamp and confidence; does not change lifecycle status unless autoTransition or decisionStatus/lifecycleStatus is supplied.'
+      route: 'Do not use for evidence (shadowgraph_confidence_evidence) or state-only moves (shadowgraph_update_status changes the lifecycle state).',
+      effects: 'Replaces prior outcome and recalculates confidence; does not change lifecycle status unless autoTransition or decisionStatus/lifecycleStatus is supplied (conflicts error).'
     },
     inputSchema: {
       type: 'object',
@@ -1709,10 +1709,10 @@ const CATALOG = [
     persists: false,
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     describe: {
-      does: 'Expand a recordId and revision digest handle as input to fetch its full current record (T2) and counterpart investigation.',
-      route: 'shadowgraph_context supplies the handle; pass recordId, digest and flattened scope fields at top level.',
+      does: 'Expand a recordId and revision digest handle from shadowgraph_context into the full current record and rival records.',
+      route: 'shadowgraph_context supplies the handle; use shadowgraph_search or shadowgraph_retrieve for text queries.',
       effects: 'Reads only. A stale digest yields revision_changed; purged yields purged; missing or out-of-scope yields unavailable.',
-      returns: 'Returns record, status and counterparts. Stale digest yields revision_changed; purged yields purged; missing or out-of-scope yields unavailable.'
+      returns: 'Flatten scope to top level. Stale digest yields revision_changed; purged yields purged; missing or out-of-scope yields unavailable.'
     },
     inputSchema: {
       type: 'object',
@@ -1832,9 +1832,9 @@ const CATALOG = [
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
     describe: {
       does: 'Age overdue owned decisions past reviewAfter to stale and expire owned facts past expiresAt against now.',
-      route: 'Use shadowgraph_validate for read-only integrity checks; Maintenance does not repair or restore.',
-      effects: 'Compares reviewAfter and expiresAt to now and commits status transitions on repeats.',
-      returns: 'Returns { at, staleDecisionIds, agedDecisionIds, reviewSignals, due }.'
+      route: 'Use shadowgraph_validate for integrity checks or shadowgraph_review for rules; Maintenance does not repair or restore.',
+      effects: 'Mutates owned records only; repeat runs commit a revision without re-aging.',
+      returns: ''
     },
     inputSchema: {
       type: 'object',
@@ -2165,7 +2165,7 @@ const CATALOG = [
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     describe: {
       does: 'Audit one decision by decisionId (or project): explain all reopen verdicts (grounded, contested, unevaluated).',
-      route: 'Use shadowgraph_supersede to replace a decision when an audited alternative wins.',
+      route: 'Use shadowgraph_review to queue signals, or shadowgraph_supersede to replace it.',
       effects: 'Rejects unknown, out-of-scope or closed decisionId. Commits an audit revision without changing decision status.',
       returns: 'review_recommended: condition fired; manual_review: unresolved evidence; unchanged: complete, no trigger.'
     },
@@ -2333,10 +2333,10 @@ export function buildToolCatalog({ verifier = false, embeddingConfigured = false
 
 const COMPACT_ROUTE_OVERRIDES = Object.freeze({
   shadowgraph_review: {
-    route: 'Use shadowgraph_ack_review to close reviewSignalId.'
+    route: 'Use shadowgraph_review_context for check-in working sets, or shadowgraph_ack_review to close reviewSignalId.'
   },
   shadowgraph_reconsider: {
-    route: 'Use shadowgraph_record_decision(supersedes: [id]) when an audited alternative wins.'
+    route: 'Use shadowgraph_review to queue signals, or shadowgraph_record_decision(supersedes: [id]) when an audited alternative wins.'
   },
   shadowgraph_record_outcome: {
     route: 'Use shadowgraph_record_decision to record choices; update decision lifecycle status directly via decisionStatus.'

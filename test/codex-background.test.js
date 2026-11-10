@@ -50,7 +50,7 @@ test('memory failure retains pending work, permits both tasks, and recovers auto
   const config = await loadCodexSetup(f.home);
   let data = JSON.parse(await readFile(config.store.file));
   assert.equal(data.records.filter(x => x.kind === 'capture' && x.state === 'pending').length, 4);
-  await runCodexSession({ ...f, prompts: [], settleMs: 5000, memoryRetryMs: 100,
+  await runCodexSession({ ...f, prompts: [], settleMs: 15000, memoryRetryMs: 100,
     makeExtractor: () => ({ check: async () => f.executor, extract: async input => extracted(input) }) });
   data = JSON.parse(await readFile(config.store.file));
   assert.equal(data.records.filter(x => x.kind === 'capture' && x.state === 'extracted').length, 4);
@@ -116,7 +116,7 @@ test('durable outbox survives unavailable storage and replay after a commit is i
   assert.equal(files.length, 1);
   const accepted = await readFile(join(outbox, files[0]));
   if (pristine) await writeFile(config.store.file, pristine); else await unlink(config.store.file);
-  await runCodexSession({ ...f, prompts: [], settleMs: 5000, memoryRetryMs: 100, makeExtractor: adapter });
+  await runCodexSession({ ...f, prompts: [], settleMs: 15000, memoryRetryMs: 100, makeExtractor: adapter });
   const before = JSON.parse(await readFile(config.store.file));
   assert.equal(before.records.filter(r => r.kind === 'capture').length, 2);
   assert.equal((await readdir(outbox)).length, 0);

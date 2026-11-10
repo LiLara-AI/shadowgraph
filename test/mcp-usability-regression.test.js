@@ -39,7 +39,7 @@ test('usability regression: read cluster disambiguation (search, retrieve, recal
   const expand = find('shadowgraph_expand');
   assert.ok(expand, 'shadowgraph_expand exists');
   // Declares dependency on context handle and stale/purged/unavailable outcomes
-  assert.match(expand.description, /^Expand a recordId and revision digest handle as input to fetch its full current record \(T2\) and counterpart investigation\./);
+  assert.match(expand.description, /^Expand a recordId and revision digest handle from shadowgraph_context into the full current record and rival records\./);
   assert.match(expand.describe.route, /shadowgraph_context supplies the handle/i);
   assert.match(expand.describe.returns, /Stale digest yields revision_changed; purged yields purged; missing or out-of-scope yields unavailable/i);
 
@@ -53,7 +53,7 @@ test('usability regression: review family disambiguation (review, review_signals
   const find = (name) => catalog.find((tool) => tool.name === name);
 
   const review = find('shadowgraph_review');
-  assert.match(review.description, /^Evaluate open project decisions against current facts, persist due review signals, and return due decisions/i);
+  assert.match(review.description, /^Evaluate open project decisions against current facts, persist due review signals, and return \{ items, completeness \}/i);
   assert.match(review.describe.route, /shadowgraph_review_signals to inspect the saved signal queue/i);
   assert.match(review.describe.effects, /Saves owned signals deduped by decision\/reason\/coverage and commits a revision/i);
 
