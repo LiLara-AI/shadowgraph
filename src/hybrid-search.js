@@ -107,7 +107,7 @@ export function stemArabicToken(token) {
 const BILINGUAL_SYNONYM_GROUPS = [
   ['cache', 'caching', 'كاش', 'مؤقت'],
   ['storage', 'store', 'تخزين', 'حفظ'],
-  ['local', 'locally', 'offline', 'محلي', 'محليا', 'اتصال'],
+  ['local', 'locally', 'offline', 'محلي', 'محليا'],
   ['cloud', 'سحابي', 'سحابيه', 'سحابه'],
   ['database', 'db', 'datastore', 'قاعده', 'بيانات', 'داتابيز'],
   ['decision', 'decisions', 'قرار', 'قرارات'],

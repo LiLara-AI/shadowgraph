@@ -8,15 +8,15 @@ Principle: **every hit must be explainable by a real content field.** A search r
 
 ## 1. Declared content fields
 
-A free-text query term may only match these ten fields (`CONTENT_SEARCH_FIELDS`):
+A free-text query term may only match these sixteen fields (`CONTENT_SEARCH_FIELDS`):
 
-`title` · `goal` · `chosen` · `assumption` · `evidence` · `alternative` · `attempt solution` · `attempt result` · `attempt reason` · `environment`
+`title` · `goal` · `chosen` · `assumption` · `evidence` · `alternative` · `attempt task` · `attempt solution` · `attempt result` · `attempt reason` · `environment` · `tags` · `changeSummary` · `outcome lessons` · `fact key` · `fact value`
 
-`evidence` matches an entry's `source` or `detail`; `alternative` matches a `label` or `reasonRejected`. Both are matched field-wise rather than by stringifying the object, so a query cannot match an alternative's internal `id` or `status`.
+`evidence` matches an entry's `source` or `detail`; `alternative` matches a `label` or `reasonRejected`. Both are matched field-wise rather than by stringifying the object, so a query cannot match an alternative's internal `id` or `status`. `fact key` matches the fact's key; `fact value` matches primitive strings, numbers and booleans anywhere inside its value, including arrays and objects. The result's `matched` list names the applicable field.
 
 ## 2. What is NOT content
 
-**Schema key names, internal metadata, and structured values never match a free-text term.** The G7 defect was `JSON.stringify(record)` matching, which made `search('title')`, `search('schemaVersion')`, `search('confidence')`, and `search('kind')` all return records containing none of those words — and `matched: []` with `reason: 'Matched record content'`, a claim contradicted by its own evidence field.
+**Schema key names and internal metadata never match a free-text term.** Structured fact values are content only through the declared `fact value` field above. The G7 defect was `JSON.stringify(record)` matching, which made `search('title')`, `search('schemaVersion')`, `search('confidence')`, and `search('kind')` all return records containing none of those words — and `matched: []` with `reason: 'Matched record content'`, a claim contradicted by its own evidence field.
 
 Explicitly non-matchable: `id`, `kind`, `schemaVersion`, `project`, `status`, `confidence` (and all its subfields), `createdAt`/`updatedAt`, `supersededBy`, `sourceClass`/`sourceRaw`/`actor`/`client`/`sessionId`, `reviewAfter`, and all journal fields.
 

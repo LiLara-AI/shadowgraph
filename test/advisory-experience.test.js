@@ -442,6 +442,36 @@ test('Q6: Arabic stemming, bilingual synonym expansion, keyword tags, outcome le
   assert.equal(partialHit.items[0].partialMatch, true);
 });
 
+test('search finds stored fact keys and values and names the matching content fields', () => {
+  const graph = createShadowGraph();
+  const fact = graph.addFact({
+    project: 'search-proj',
+    key: 'deployment',
+    value: { mode: 'multi-user', region: 'eu' }
+  });
+
+  const byValue = graph.search('multi-user', { project: 'search-proj' });
+  assert.equal(byValue.items.length, 1);
+  assert.equal(byValue.items[0].record.id, fact.id);
+  assert.deepEqual(byValue.items[0].matched, ['fact value']);
+  assert.ok(byValue.completeness.contentFields.includes('fact key'));
+  assert.ok(byValue.completeness.contentFields.includes('fact value'));
+
+  const byKey = graph.search('deployment', { project: 'search-proj' });
+  assert.equal(byKey.items.length, 1);
+  assert.equal(byKey.items[0].record.id, fact.id);
+  assert.deepEqual(byKey.items[0].matched, ['fact key']);
+});
+
+test('an Arabic connection query does not match unrelated local-only memory through synonyms', () => {
+  assert.equal(expandSearchTokens('اتصال').includes('local'), false);
+  assert.equal(expandSearchTokens('اتصال').includes('محلي'), false);
+
+  const graph = createShadowGraph();
+  graph.addDecision({ project: 'search-proj', title: 'Storage location', chosen: 'local only' });
+  assert.equal(graph.search('اتصال', { project: 'search-proj', expandSynonyms: true }).items.length, 0);
+});
+
 test('Q7: compact mode lifecycle ergonomics (failedAttempts & relatedTo graph links walked by retrieve and traverse)', () => {
   const graph = createShadowGraph();
 

@@ -30,7 +30,7 @@ function formatUsageHelp() {
   return [
     'Usage: shadowgraph <command> [options] [arguments]',
     '',
-    'Adversarial, memory-driven intelligence engine exposing MCP endpoints, HTTP, and CLI.',
+    'Local-first decision and experience memory for AI coding agents, through MCP, HTTP, and CLI.',
     '',
     'Commands:',
     '  mcp                           Start Model Context Protocol (MCP) stdio server',
@@ -47,7 +47,7 @@ function formatUsageHelp() {
     '  fact <JSON>                   Record a bi-temporal fact',
     '  supersede <JSON>              Supersede an existing decision with replacement',
     '  recall <JSON>                 Retrieve ranked memories and facts by semantic query',
-    '  search <JSON>                 Search decisions and attempts (supports matchMode and Arabic stemming)',
+    '  search <JSON>                 Search decisions, attempts, and facts (supports matchMode and Arabic stemming)',
     '  retrieve <JSON>               Retrieve graph entities matching query',
     '  context <JSON>                Get contextual summary and advisory items for a project',
     '  review-context <JSON>         Evaluate active conditions and persist state',
@@ -99,8 +99,8 @@ function formatUsageHelp() {
     '  SHADOWGRAPH_FILE              Path to storage database (default: ./.shadowgraph/data.json)',
     '  SHADOWGRAPH_STORAGE           Storage backend: "json" or "sqlite" (default: "json")',
     '  SHADOWGRAPH_PROJECT           Default project identifier for graph operations',
-    '  SHADOWGRAPH_MCP_PROFILE       MCP tool profile: set to "workflow" (20 tools); unset for full (35) or compact',
-    '  SHADOWGRAPH_MCP_COMPACT       MCP compact flag: 1 for compact (16 tools, profile unset); 0 or unset for full (35)',
+    '  SHADOWGRAPH_MCP_PROFILE       MCP tool profile: set to "workflow" (20 tools); unset for full (35/36) or compact',
+    '  SHADOWGRAPH_MCP_COMPACT       MCP compact flag: 1 for compact (16 tools, profile unset); 0 or unset for full (35/36)',
     '  PORT                          HTTP server port for `serve` command (default: 8787)'
   ].join('\n');
 }
@@ -159,7 +159,8 @@ function parse(value) {
     const trimmed = typeof value === 'string' ? value.trim() : String(value);
     const snippet = trimmed.length > 50 ? `${trimmed.slice(0, 47)}...` : trimmed;
     const msg = error?.message ? error.message.replace(/^SyntaxError:\s*/i, '') : 'Invalid JSON';
-    throw new Error(`Invalid JSON argument: ${msg}. Input: "${snippet}"`);
+    const shellHint = trimmed.includes('\\"') ? ' In bash, wrap the JSON in single quotes; PowerShell-style \\" escaping is not JSON input here.' : '';
+    throw new Error(`Invalid JSON argument: ${msg}. Input: "${snippet}"${shellHint}`);
   }
 }
 
@@ -178,6 +179,7 @@ async function startHttp() {
   const port = Number(process.env.PORT ?? 8787);
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error('PORT must be an integer from 0 through 65535');
   const { createShadowGraphServer } = await import('./server.js');
+  if (!process.env.SHADOWGRAPH_API_TOKEN) console.error('ShadowGraph: SHADOWGRAPH_API_TOKEN is not set; local processes can read and write this loopback API.');
   const app = await createShadowGraphServer({ file, storage: storageType });
   app.server.listen(port, '127.0.0.1', () => {
     const address = app.server.address();
@@ -488,13 +490,14 @@ async function runOneShot() {
         command: 'setup',
         created: !initializedBeforeOpen,
         storage: { type: storageType, path: file },
-        next: 'Run `shadowgraph doctor`, then `shadowgraph remember <JSON>`.'
+        next: 'Run `shadowgraph doctor`, then follow the decision/fact/review demo in docs/manual-usage.md.'
       };
     }
 
     if (command === 'doctor') {
       await access(file, fsConstants.R_OK | fsConstants.W_OK);
-      const validation = graph.validate();
+      const validation = privileged.privilegedValidate(graph);
+      const scopedValidation = graph.validate();
       const storageDiagnostics = await store.validate?.();
       const mcpPath = fileURLToPath(new URL('./mcp.js', import.meta.url));
       await access(mcpPath, fsConstants.R_OK);
@@ -518,42 +521,41 @@ async function runOneShot() {
             warning: `Configured SHADOWGRAPH_FILE "${placeholderConfigured}" is a template placeholder; using fallback storage at "${file}".`
           } : {}),
           ...(storageDiagnostics?.issues?.length ? { diagnostics: storageDiagnostics } : {}) },
-        graph: { valid: graphValid, issues: validation.issues?.length ?? 0, completeness: validation.completeness, limitation: validation.limitation },
+        graph: { valid: graphValid, issues: validation.issues?.length ?? 0, scope: 'store', completeness: scopedValidation.completeness, limitation: scopedValidation.limitation },
         hooks: hooks.stores.length ? { activeStore: hooks.stores[0].file, sameStore: !hooks.other } : { activeStore: null },
+        extraction: {
+          platformSupported: process.platform === 'win32',
+          detail: process.platform === 'win32'
+            ? 'Automatic extraction requires separate activation and a supported Claude Code host.'
+            : 'Automatic extraction is unavailable on this platform; use the manual memory tools.'
+        },
         mcp: {
           available: true,
+          defaultMode: 'full',
           recommendedMode: 'compact',
           workflowMode: 'Set SHADOWGRAPH_MCP_PROFILE=workflow for 20 tools.',
-          fullMode: 'Set SHADOWGRAPH_MCP_COMPACT=0 (or unset) with SHADOWGRAPH_MCP_PROFILE unset for 35 tools (default).',
+          fullMode: 'Set SHADOWGRAPH_MCP_COMPACT=0 (or unset) with SHADOWGRAPH_MCP_PROFILE unset for 35/36 tools (default).',
           profiles: {
-            compact: '16 tools (lean footprint, SHADOWGRAPH_MCP_COMPACT=1 with SHADOWGRAPH_MCP_PROFILE unset)',
+            compact: '16 tools (preferred agent list, SHADOWGRAPH_MCP_COMPACT=1 with SHADOWGRAPH_MCP_PROFILE unset)',
             workflow: '20 tools (balanced lifecycle, SHADOWGRAPH_MCP_PROFILE=workflow with SHADOWGRAPH_MCP_COMPACT unset or 0)',
-            full: '35 tools (default comprehensive administrative & review, SHADOWGRAPH_MCP_PROFILE unset and SHADOWGRAPH_MCP_COMPACT=0 or unset)'
+            full: '35/36 tools (default comprehensive administrative & review, SHADOWGRAPH_MCP_PROFILE unset and SHADOWGRAPH_MCP_COMPACT=0 or unset)'
           }
         }
       };
     }
 
     let result;
-    if (command === 'stats') result = graph.stats();
-    else if (command === 'list') result = graph.exportData(parse(input || '{}'));
-    else if (command === 'search') { const query = parse(input || '{}'); result = graph.search(query.query ?? '', query); }
-    else if (command === 'remember') { const value = prepared(parse(input)); result = Array.isArray(value.operations) ? graph.applyMemoryPlan(value) : graph.remember(value); await store.save(privilegedSnapshot(graph)); }
-    else if (command === 'recall') { const value = parse(input || '{}'); result = graph.recall(value.query ?? '', value); }
+    if (command === 'remember') { const value = prepared(parse(input)); result = Array.isArray(value.operations) ? graph.applyMemoryPlan(value) : graph.remember(value); await store.save(privilegedSnapshot(graph)); }
     else if (command === 'markdown-sync') {
       const value = parse(input);
       const persist = value.mode === 'pull' && value.dryRun !== true ? async (data) => store.save(data) : undefined;
       const loadPersisted = persist ? async () => store.load() : undefined;
       result = await syncMarkdownWorkspace({ graph, ...value, ...(persist ? { persist, loadPersisted } : {}) });
     }
-    else if (command === 'review') { result = graph.review(parse(input || '{}')); await store.save(privilegedSnapshot(graph)); }
-    else if (command === 'reconsider') { result = graph.reconsider(parse(input || '{}')); await store.save(privilegedSnapshot(graph)); }
     else if (command === 'fact') { result = graph.addFact(prepared(parse(input))); await store.save(privilegedSnapshot(graph)); }
     else if (command === 'outcome') { const value = prepared(parse(input)); result = graph.setOutcome(value.decisionId, value.outcome, value); await store.save(privilegedSnapshot(graph)); }
     else if (command === 'status') { const value = prepared(parse(input)); result = graph.updateDecisionStatus(value.decisionId, value.status, value); await store.save(privilegedSnapshot(graph)); }
     else if (command === 'link') { result = graph.link(prepared(parse(input))); await store.save(privilegedSnapshot(graph)); }
-    else if (command === 'traverse') result = graph.traverse(parse(input));
-    else if (command === 'redact') result = graph.redact(parse(input));
     else if (command === 'supersede') { result = graph.supersedeDecision(prepared(parse(input))); await store.save(privilegedSnapshot(graph)); }
     else if (command === 'purge-preview' || command === 'purge') {
       const value = parse(input);
@@ -569,14 +571,7 @@ async function runOneShot() {
       }
     }
     else if (command === 'confidence-evidence') { result = graph.addConfidenceEvidence(prepared(parse(input))); await store.save(privilegedSnapshot(graph)); }
-    else if (command === 'journal') result = graph.getJournal(parse(input || '{}'));
-    else if (command === 'rebuild') result = graph.rebuild(parse(input || '{}'));
-    else if (command === 'maintain') { result = graph.maintain(parse(input || '{}')); await store.save(privilegedSnapshot(graph)); }
-    else if (command === 'signals') result = graph.getReviewSignals(parse(input || '{}'));
     else if (command === 'ack') { const value = prepared(parse(input)); result = graph.acknowledgeReview(value.id, value); await store.save(privilegedSnapshot(graph)); }
-    else if (command === 'retrieve') { const value = parse(input || '{}'); result = graph.retrieve(value.query ?? '', value); }
-    else if (command === 'validate') result = graph.validate();
-    else if (command === 'repair-plan') result = graph.repairPlan();
     else if (command === 'backup') result = await backupFile(file, input || `${file}.backup`, { store });
     else if (command === 'restore') {
       // `--memory-only` excludes authority collections; ordinary restore keeps

@@ -127,12 +127,13 @@ test('follow-up CLI: doctor observes missing SQLite without materializing storag
   if (sqliteAvailable) {
     const setup = await runCli(['setup'], sqliteEnv);
     assert.equal(setup.code, 0, setup.stderr);
+    assert.equal(setup.stderr, '');
     assert.deepEqual(JSON.parse(setup.stdout), {
       ok: true,
       command: 'setup',
       created: true,
       storage: { type: 'sqlite', path: resolve(sqliteFile) },
-      next: 'Run `shadowgraph doctor`, then `shadowgraph remember <JSON>`.'
+      next: 'Run `shadowgraph doctor`, then follow the decision/fact/review demo in docs/manual-usage.md.'
     });
     assert.equal(await pathExists(sqliteFile), true, 'setup must still create SQLite storage');
 
@@ -161,7 +162,7 @@ test('follow-up CLI: doctor observes missing SQLite without materializing storag
     command: 'setup',
     created: true,
     storage: { type: 'json', path: resolve(jsonFile) },
-    next: 'Run `shadowgraph doctor`, then `shadowgraph remember <JSON>`.'
+    next: 'Run `shadowgraph doctor`, then follow the decision/fact/review demo in docs/manual-usage.md.'
   });
   const jsonPayload = JSON.parse(await readFile(jsonFile, 'utf8'));
   assert.equal(jsonPayload.revision, 1);

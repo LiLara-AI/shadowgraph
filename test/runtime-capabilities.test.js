@@ -34,3 +34,16 @@ test('runtime capability helper detects node:sqlite and gives unavailable runtim
     assert.equal(capabilities.nodeSqlite.reason, NODE_SQLITE_NOT_APPLICABLE_REASON);
   }
 });
+
+test('SQLite capability detection filters only the known SQLite experimental warning', async () => {
+  const { execFile } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  const moduleUrl = new URL('../src/runtime-capabilities.js', import.meta.url).href;
+  const result = await promisify(execFile)(process.execPath, ['--input-type=module', '--eval', `
+    await import(${JSON.stringify(moduleUrl)});
+    process.emitWarning('SQLite is an experimental feature and might change at any time', 'ExperimentalWarning');
+    process.emitWarning('Another experimental feature', 'ExperimentalWarning');
+  `]);
+  assert.doesNotMatch(result.stderr, /SQLite is an experimental feature/u);
+  assert.match(result.stderr, /Another experimental feature/u);
+});

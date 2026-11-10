@@ -27,6 +27,7 @@
     <p>The token stays only in this page's memory and is <strong>not persisted</strong> to storage, cookies, or local browser storage. Closing or reloading the page clears it.</p>
   </section>
   <section><div id="stats" class="grid"></div></section>
+  <section><h2>Alternatives to reconsider</h2><div id="reconsiderations" class="grid">Click Load</div></section>
   <section><h2>Review signals</h2><pre id="signals">Click Load</pre></section>
   <section><h2>Graph records</h2><pre id="records">Click Load</pre></section>
   <script>
@@ -44,6 +45,27 @@
       }
       return body;
     }
+    function renderReconsiderations(signals) {
+      const open = (signals.items ?? []).filter((item) => item.status === 'open' && item.alternativesToReconsider?.length);
+      if (!open.length) {
+        const empty = document.createElement('p');
+        empty.textContent = 'No open review signals name an alternative to reconsider.';
+        $('reconsiderations').replaceChildren(empty);
+        return;
+      }
+      $('reconsiderations').replaceChildren(...open.map((signal) => {
+        const card = document.createElement('div');
+        card.className = 'card';
+        const title = document.createElement('strong');
+        title.textContent = signal.title ?? signal.decisionId;
+        const reason = document.createElement('p');
+        reason.textContent = `Changed condition: ${signal.reason}`;
+        const alternatives = document.createElement('p');
+        alternatives.textContent = `Reconsider: ${signal.alternativesToReconsider.join(', ')}`;
+        card.append(title, reason, alternatives);
+        return card;
+      }));
+    }
     async function load() {
       const [stats, signals, records] = await Promise.all([
         request('/stats'), request('/review-signals'), request('/records')
@@ -54,6 +76,7 @@
         card.textContent = `${key}: ${typeof value === 'object' ? JSON.stringify(value, null, 2) : value}`;
         return card;
       }));
+      renderReconsiderations(signals);
       $('signals').textContent = JSON.stringify(signals, null, 2);
       $('records').textContent = JSON.stringify(records, null, 2);
     }

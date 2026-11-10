@@ -241,7 +241,7 @@ test('PR13 F33 schemas forbid canonical creation IDs while reference IDs remain 
 
 test('PR13 dashboard forwards explicit project or origin to each same-origin read', async () => {
   const html = await readFile(new URL('../dashboard/index.html', import.meta.url), 'utf8');
-  const elements = new Map(['token', 'project', 'origin', 'load', 'stats', 'signals', 'records'].map(id => [id, { value: '', replaceChildren() {} }]));
+  const elements = new Map(['token', 'project', 'origin', 'load', 'stats', 'signals', 'records', 'reconsiderations'].map(id => [id, { value: '', replaceChildren() {} }]));
   const requested = [];
   runInNewContext(html.match(/<script>([\s\S]*?)<\/script>/)[1], {
     document: { getElementById: id => elements.get(id), createElement: () => ({}) }, URLSearchParams,

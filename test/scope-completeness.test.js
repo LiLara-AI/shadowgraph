@@ -146,8 +146,8 @@ test('PR-11 HTTP and CLI serialize coverage, including doctor count projection',
 
 test('PR-11 dashboard renders object metadata as JSON through text content', async () => {
   const html = await readFile(new URL('../dashboard/index.html', import.meta.url), 'utf8');
-  const load = html.slice(html.indexOf('async function load()'), html.indexOf("$('load').onclick"));
-  const elements = Object.fromEntries(['stats', 'signals', 'records'].map((id) => [id, { textContent: '', children: [], replaceChildren(...children) { this.children = children; }, append(...children) { this.children.push(...children); } }]));
+  const load = html.slice(html.indexOf('function renderReconsiderations'), html.indexOf("$('load').onclick"));
+  const elements = Object.fromEntries(['stats', 'signals', 'records', 'reconsiderations'].map((id) => [id, { textContent: '', children: [], replaceChildren(...children) { this.children = children; }, append(...children) { this.children.push(...children); } }]));
   const value = { decisions: 0, completeness: { complete: false, limitation: { code: 'scoped_coverage' } } };
   const document = { createElement: () => ({ textContent: '', className: '' }) };
   await new Function('$', 'request', 'document', `${load}; return load();`)((id) => elements[id], async () => value, document);

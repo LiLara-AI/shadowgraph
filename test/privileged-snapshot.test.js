@@ -121,8 +121,9 @@ test('only allowlisted repository modules import the privileged snapshot', async
 const sourceLines = async (path) => (await readFile(join(root, path), 'utf8')).split(/\r?\n/);
 
 test('the public reads stay on the public export', async () => {
-  const cliList = (await sourceLines('src/cli.js')).filter((line) => line.includes("command === 'list'"));
-  assert.deepEqual(cliList.map((line) => line.trim()), ["else if (command === 'list') result = graph.exportData(parse(input || '{}'));"]);
+  const cliList = (await sourceLines('src/cli.js')).filter((line) => line.includes('list:') && line.includes('graph.exportData'));
+  assert.equal(cliList.length, 1);
+  assert.match(cliList[0], /list:\s*\(value\)\s*=>\s*graph\.exportData\(value\)/);
   const records = (await sourceLines('src/server.js')).filter((line) => line.includes("path === '/records'"));
   assert.deepEqual(records.map((line) => line.trim()), ["if (method === 'GET' && path === '/records') return graph.exportData(body ?? {});"]);
   const markdown = (await readFile(join(root, 'src/markdown-workspace.js'), 'utf8'));
