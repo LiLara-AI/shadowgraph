@@ -1,5 +1,33 @@
 # ShadowGraph release notes
 
+## 0.44.2 — Compact Lifecycle, Actionable Errors & Safe Integration Configurations (2026-11-10)
+
+This release delivers the complete decision lifecycle in the compact MCP profile, actionable caller-facing tool validation errors with explicit field paths and enum hints, enhanced attempt parameter usability, and safe integration configuration fallbacks across client templates.
+
+### Key Highlights & Improvements
+
+1. **Complete Decision Lifecycle in Compact Profile (R1)**:
+   - Hosts running under `SHADOWGRAPH_MCP_COMPACT=1` can record (`shadowgraph_record_decision`), advance lifecycle status to `in_progress` and `validated` (`shadowgraph_record_outcome` with `decisionStatus`), supersede (`shadowgraph_record_decision` with `supersedes`), and record outcomes without invoking excluded or unavailable tools.
+   - Profile inventories remain strictly invariant: 16 Compact, 20 Workflow, and 35 Full (36 with verifier).
+
+2. **Compact Tool Description Alignment & Route Verification (R2)**:
+   - Removed all dangling references in compact tool descriptions pointing to tools excluded from the compact profile.
+   - Added automated route verification tests ensuring every tool advertised in the compact profile references only callable tools.
+   - Preserved wire budgets and Glama TDQS quality scores within calibrated headroom limits.
+
+3. **Actionable Caller-Facing Validation Errors (R3)**:
+   - Tool validation errors across all MCP profiles now include the offending `fieldPath` and actionable guidance (such as allowed enum values) directly in the caller-visible message text (`Tool execution failed (${issueCode}): field "${fieldPath}" ...`).
+   - Structured error details are preserved across both legacy JSON-RPC (`error.data`) and modern CallToolResult (`result._meta['shadowgraph/error']`).
+   - Zero leakage: Server filesystem paths, stack traces, and environment secrets are never disclosed to callers.
+
+4. **Attempt Parameter Usability (R4)**:
+   - Restored `resultClass` as optional in `shadowgraph_record_attempt` (`required: ['solution', 'result']`).
+   - Preserved wording-based failure heuristic in context when `resultClass` is omitted, while enforcing strict validation against `['failed', 'succeeded', 'inconclusive']` when explicitly supplied.
+
+5. **Safe Integration Configurations & Storage Fallback (R5)**:
+   - Enhanced `src/storage.js` to detect placeholder paths in `SHADOWGRAPH_FILE` (e.g. `/absolute/path/to/`, Windows backslash placeholders, bracketed placeholders) and safely fall back to `~/.shadowgraph/data.json`, preventing root drive pollution.
+   - Sanitized integration templates (`integrations/*.mcp.*`) to omit dangerous placeholder paths by default, backed by clear documentation in `integrations/README.md`.
+
 ## 0.44.1 — Phase 1A Technical Preview (2026-11-09)
 
 The **16-tool compact**, 20-tool workflow, and 35-tool full inventories remain unchanged. New MCP attempt writes require `resultClass`; CLI and JavaScript callers and older stored attempts retain the wording-based fallback when it is absent. MCP fact writes require fact `value`, and every decision alternative requires an alternative `label`, matching the existing runtime contracts. Structured condition schemas now describe canonical `key`/`value` fields and the `target`/`expected` aliases without dropping legacy or symbolic string rules.

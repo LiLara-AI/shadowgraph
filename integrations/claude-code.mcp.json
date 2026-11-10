@@ -5,8 +5,7 @@
       "command": "shadowgraph",
       "args": ["mcp"],
       "env": {
-        "SHADOWGRAPH_MCP_COMPACT": "1",
-        "SHADOWGRAPH_FILE": "/absolute/path/to/shared-shadowgraph/data.json"
+        "SHADOWGRAPH_MCP_COMPACT": "1"
       }
     }
   }

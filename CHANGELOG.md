@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.44.2 (2026-11-10)
+
+### Fixed
+
+- **Decision Lifecycle in Compact Profile (R1)**: Enable hosts operating under the compact profile (`SHADOWGRAPH_MCP_COMPACT=1`) to complete the entire decision lifecycle (record, advance status, supersede, record outcome) without calling excluded tools. Decision lifecycle status transitions can be executed via `shadowgraph_record_outcome` using `decisionStatus` or `lifecycleStatus`, and superseding is executed via `shadowgraph_record_decision` using `supersedes`.
+- **Compact Tool Descriptions & Route Verification (R2)**: Removed all dangling references in compact tool descriptions that previously pointed to tools excluded from the compact profile. Added an automated route verification test suite enforcing that every tool and route advertised in compact mode references only callable tools within that profile. Maintained wire-size budgets and Glama TDQS quality within calibrated headroom limits.
+- **Actionable Caller-Facing Validation Errors (R3)**: Enhanced caller-visible validation error messages across all profiles to explicitly identify the offending `fieldPath` and supply actionable guidance (including allowed enum values) directly in the message string. Preserved structured error metadata across both legacy `error.data` and modern `result._meta['shadowgraph/error']` while strictly preventing leakage of internal filesystem paths, stack traces, or credentials.
+- **Attempt Parameter Usability (R4)**: Restored `resultClass` as optional in `shadowgraph_record_attempt` (`required: ['solution', 'result']`). When omitted, attempt records are created cleanly and categorized in context queries via the wording-based failure heuristic; when provided, input is strictly validated against allowed values (`failed`, `succeeded`, `inconclusive`).
+- **Safe Integration Configurations & Storage Fallbacks (R5)**: Hardened storage path resolution in `src/storage.js` to detect placeholder paths in `SHADOWGRAPH_FILE` (such as `/absolute/path/to/`, Windows backslash placeholders, bracketed placeholders) and safely fall back to user home (`~/.shadowgraph/data.json`) without drive-root pollution or crashes. Sanitized integration configuration templates (`integrations/*.mcp.*`) to omit unreplaced placeholders by default and documented safe configuration practices in `integrations/README.md`.
+
 ## 0.44.1 — Phase 1A Technical Preview (2026-11-09)
 
 ### Changed

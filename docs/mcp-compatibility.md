@@ -38,7 +38,7 @@ Modern complete results include `resultType: 'complete'` and server identity met
 
 ### Safe caller error details
 
-Phase 1 caller-corrective failures use the public message `Tool execution failed (<issueCode>)` and constructed details `{ issueCode, fieldPath, retryable: false }`. Legacy responses place that object in JSON-RPC `error.data`; modern `CallToolResult` responses place it in `result._meta['shadowgraph/error']`. Tagged missing-field details and allowlisted domain/recovery data use the same locations.
+Phase 1 caller-corrective failures include the offending `fieldPath` and actionable hints in the public message text: `Tool execution failed (<issueCode>): field "<fieldPath>" <hint>`, with constructed details `{ issueCode, fieldPath, retryable: false }`. Legacy responses place that object in JSON-RPC `error.data`; modern `CallToolResult` responses place it in `result._meta['shadowgraph/error']`. Tagged missing-field details and allowlisted domain/recovery data use the same locations.
 
 | Failure case | `issueCode` | `fieldPath` |
 | --- | --- | --- |
@@ -46,7 +46,7 @@ Phase 1 caller-corrective failures use the public message `Tool execution failed
 | Invalid decision status | `invalid_field` | `status` |
 | Invalid attempt result class | `invalid_field` | `resultClass` |
 | Illegal decision transition | `illegal_transition` | `status` |
-| Missing required field | `missing_required_field` | the required field, including `resultClass` |
+| Missing required field | `missing_required_field` | the required field |
 
 These five Phase 1 mappings emit four caller-error codes because `invalid_field` covers both invalid-value cases. Raw error messages, supplied values, filesystem paths, stacks, and internal diagnostic keys are not copied into these responses. `idempotency_conflict` arrives with Phase 2 and is not yet emitted.
 
@@ -538,7 +538,7 @@ Detail that used to sit in a description, kept here because it is worth having s
   attempt `reusableWhen` items accept legacy/symbolic strings and structured rules using stored facts.
   Structured rules require `key`/`value` or `target`/`expected`; explicit `null`, `false`, `0`, and
   empty-string operands are values, and an unresolved reuse condition blocks reuse.
-- `shadowgraph_record_attempt` requires `solution`, `result`, and `resultClass` for new MCP writes.
+- `shadowgraph_record_attempt` requires `solution` and `result`; `resultClass` is optional ('failed', 'succeeded', 'inconclusive'). When omitted, the result is categorized via wording heuristic.
 - `shadowgraph_record_fact` requires `key` and `value` and rejects `verificationStatus` of `verified`
   or `expired`: verification is not self-assertable and expiry belongs to `shadowgraph_maintain`.
   Writes for one key must arrive in non-decreasing `validFrom` order.
@@ -546,7 +546,7 @@ Detail that used to sit in a description, kept here because it is worth having s
   identical, and a `failed` outcome makes the decision due for review.
 - `shadowgraph_update_status` rejects an illegal move before any record, event, journal, or durable
   change. The legal moves are listed in its `status` property. Over MCP the failure arrives as
-  `Tool execution failed (illegal_transition)` with safe `status` details in the era-specific location
+  `Tool execution failed (illegal_transition): field "status" specifies an illegal status transition` with safe `status` details in the era-specific location
   above; the exact transition text remains available through the library and HTTP surfaces, where
   [the API reference](api-reference.md) lists it.
 - `shadowgraph_supersede` requires both decisions to exist, to differ, to share a project, and not to

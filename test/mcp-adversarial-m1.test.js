@@ -506,7 +506,8 @@ test('Adversarial M1-8: Required schema fields accept a classified attempt paylo
     resultClass: 'succeeded'
   };
   const attemptTool = catalog.find((t) => t.name === 'shadowgraph_record_attempt');
-  assert.ok(attemptTool.inputSchema.required.includes('resultClass'));
+  assert.ok(!attemptTool.inputSchema.required.includes('resultClass'));
+  assert.deepEqual(attemptTool.inputSchema.required, ['solution', 'result']);
   for (const req of attemptTool.inputSchema.required) {
     assert.ok(req in classifiedAttemptPayload, `Classified payload must satisfy required property ${req}`);
   }

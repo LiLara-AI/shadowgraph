@@ -2,7 +2,7 @@ import { assertToolCreationInput } from './internal/creation-id.js';
 import { createInterface } from 'node:readline';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { stat as fsStat, unlink as fsUnlink } from 'node:fs/promises';
-import { createStorage, resolveDefaultProject, resolveStoragePath } from './storage.js';
+import { createStorage, isPlaceholderPath, resolveDefaultProject, resolveStoragePath } from './storage.js';
 import { createShadowGraph, isCommittedRejection } from './shadowgraph.js';
 import { createEmbeddingClient } from './embedding.js';
 import { VERSION } from './version.js';
@@ -15,10 +15,12 @@ import { readExtractionAvailability } from './internal/extraction-availability.j
 import { DELETION_CODES } from './internal/deletion-knowledge.js';
 
 const file = resolveStoragePath(process.env.SHADOWGRAPH_FILE);
-const configuredDefaultProject = (!process.env.SHADOWGRAPH_FILE || process.env.SHADOWGRAPH_PROJECT || process.env.SHADOWGRAPH_AUTO_PROJECT === '1')
+const rawFile = process.env.SHADOWGRAPH_FILE;
+const hasExplicitFile = Boolean(rawFile && !isPlaceholderPath(rawFile));
+const configuredDefaultProject = (!hasExplicitFile || process.env.SHADOWGRAPH_PROJECT || process.env.SHADOWGRAPH_AUTO_PROJECT === '1')
   ? resolveDefaultProject()
   : null;
-const multiProcessSyncEnabled = process.env.SHADOWGRAPH_MULTI_PROCESS_SYNC === '1' || !process.env.SHADOWGRAPH_FILE;
+const multiProcessSyncEnabled = process.env.SHADOWGRAPH_MULTI_PROCESS_SYNC === '1' || !hasExplicitFile;
 const injectedRestoreFaultStages = process.env.NODE_ENV === 'test'
   ? new Set(String(process.env.SHADOWGRAPH_TEST_RESTORE_FAULT_STAGES ?? '').split(',').map((value) => value.trim()).filter(Boolean))
   : new Set();
@@ -249,11 +251,12 @@ async function safeEmbed(text) {
 }
 
 function missingRequiredField(fieldPath) {
+  const publicMessage = `Tool execution failed (missing_required_field): field "${fieldPath}" is required`;
   return applicationError(
     -32000,
     'Invalid tool arguments',
     undefined,
-    'Tool execution failed (missing_required_field)',
+    publicMessage,
     { issueCode: 'missing_required_field', fieldPath, retryable: false }
   );
 }
@@ -666,11 +669,37 @@ const PUBLIC_DOMAIN_PATTERNS = [
   /^Unsupported rule unit /u,
   /^Invalid decision status: /u
 ];
+const CALLER_DECISION_STATUSES = Object.freeze([
+  'proposed', 'planned', 'in_progress', 'executed', 'validated',
+  'failed', 'reconsidered', 'abandoned', 'archived'
+]);
+const ATTEMPT_RESULT_ENUMS = Object.freeze(['failed', 'succeeded', 'inconclusive']);
+
 const SAFE_CALLER_ERRORS = [
-  { matches: (message) => message === 'Decision not found', issueCode: 'unknown_decision', fieldPath: 'decisionId' },
-  { matches: (message) => message.startsWith('Illegal decision status transition:'), issueCode: 'illegal_transition', fieldPath: 'status' },
-  { matches: (message) => message.startsWith('Invalid decision status:'), issueCode: 'invalid_field', fieldPath: 'status' },
-  { matches: (message) => message.startsWith('Attempt resultClass must be '), issueCode: 'invalid_field', fieldPath: 'resultClass' }
+  {
+    matches: (message) => message === 'Decision not found',
+    issueCode: 'unknown_decision',
+    fieldPath: 'decisionId',
+    formatMessage: () => 'Tool execution failed (unknown_decision): field "decisionId" refers to an unknown decision'
+  },
+  {
+    matches: (message) => message.startsWith('Illegal decision status transition:'),
+    issueCode: 'illegal_transition',
+    fieldPath: 'status',
+    formatMessage: () => 'Tool execution failed (illegal_transition): field "status" specifies an illegal status transition'
+  },
+  {
+    matches: (message) => message.startsWith('Invalid decision status:'),
+    issueCode: 'invalid_field',
+    fieldPath: 'status',
+    formatMessage: () => `Tool execution failed (invalid_field): field "status" must be one of: ${CALLER_DECISION_STATUSES.join(', ')}`
+  },
+  {
+    matches: (message) => message.startsWith('Attempt resultClass must be '),
+    issueCode: 'invalid_field',
+    fieldPath: 'resultClass',
+    formatMessage: () => `Tool execution failed (invalid_field): field "resultClass" must be one of: ${ATTEMPT_RESULT_ENUMS.join(', ')}`
+  }
 ];
 
 function containsPathOrSecret(str) {
@@ -813,7 +842,7 @@ function publicErrorDetails(error) {
     : undefined;
   if (callerError) {
     return {
-      message: `Tool execution failed (${callerError.issueCode})`,
+      message: callerError.formatMessage(),
       data: { issueCode: callerError.issueCode, fieldPath: callerError.fieldPath, retryable: false }
     };
   }

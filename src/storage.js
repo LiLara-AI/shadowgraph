@@ -8,19 +8,44 @@ import { refusePublicExport } from './internal/collections.js';
 import { DELETION_FILE_DESTINATION_REFUSED, DELETION_INTENT, DELETION_VIEW, attachDeletionView, canonicalPath, commitFile, deletionError, readUnfenced, recordGenerationChanges, refuseDeletionFileDestination, registerStoreIo, storeIo, writeSyncedFile } from './internal/deletion-knowledge.js';
 import { RestorePendingError, activation, asRestoreRefusal, completeRestore, freshPurgeIntents, purgeRecorded, recordPurges, resolvePendingRestore, restoreContext, restoreHook, retentionRestoreGuard, saveResolving, settleAfterFailure } from './internal/restore-wrapper.js';
 
+export function isPlaceholderPath(val) {
+  if (typeof val !== 'string' || !val.trim()) return false;
+  const trimmed = val.trim();
+  if (/(<[^>]*>|\[[^\]]*\]|\$\{[^}]*\}|^<)/.test(trimmed)) return true;
+  const normalized = trimmed
+    .replace(/\\/g, '/')
+    .replace(/\/+/g, '/')
+    .toLowerCase();
+  return (
+    normalized.includes('absolute/path') ||
+    normalized.includes('shared-shadowgraph') ||
+    normalized.includes('path/to/') ||
+    normalized.includes('your-path') ||
+    normalized.includes('your_path') ||
+    normalized.includes('placeholder') ||
+    normalized.includes('<path') ||
+    normalized.includes('[path')
+  );
+}
+
 export function resolveStoragePath(explicitFile, options = {}) {
   const opts = explicitFile && typeof explicitFile === 'object' ? explicitFile : (options ?? {});
   const fileArg = typeof explicitFile === 'string' ? explicitFile : opts.file;
-  if (typeof fileArg === 'string' && fileArg.trim()) return fileArg.trim();
+  if (typeof fileArg === 'string' && fileArg.trim() && !isPlaceholderPath(fileArg)) return fileArg.trim();
   const env = opts.env ?? process.env;
-  if (typeof env?.SHADOWGRAPH_FILE === 'string' && env.SHADOWGRAPH_FILE.trim()) return env.SHADOWGRAPH_FILE.trim();
+  const envFile = env?.SHADOWGRAPH_FILE;
+  if (typeof envFile === 'string' && envFile.trim() && !isPlaceholderPath(envFile)) return envFile.trim();
   const storageType = opts.type ?? env?.SHADOWGRAPH_STORAGE ?? 'json';
   const ext = storageType === 'sqlite' ? 'data.db' : 'data.json';
   const cwd = opts.cwd ?? process.cwd();
   const localPath = join(cwd, '.shadowgraph', ext);
-  if (opts.preferLocal || existsSync(localPath)) return localPath;
   const home = opts.homedir ?? env?.SHADOWGRAPH_HOME ?? homedir();
-  return home ? join(home, '.shadowgraph', ext) : localPath;
+  const defaultHomePath = home ? join(home, '.shadowgraph', ext) : localPath;
+  if (isPlaceholderPath(fileArg) || isPlaceholderPath(envFile)) {
+    return defaultHomePath;
+  }
+  if (opts.preferLocal || existsSync(localPath)) return localPath;
+  return defaultHomePath;
 }
 
 export function resolveDefaultProject(explicitProject, options = {}) {
@@ -229,20 +254,22 @@ export function createJsonFileStore(filePath, options = {}) {
 }
 
 export async function createStorage(options = {}) {
-  const file = options.file ?? resolveStoragePath(options);
-  if ((options.type ?? process.env.SHADOWGRAPH_STORAGE ?? 'json') === 'sqlite') {
+  const opts = typeof options === 'string' ? { file: options } : (options ?? {});
+  const file = resolveStoragePath(opts.file, opts);
+  const storageType = opts.type ?? ((opts.env ?? process.env).SHADOWGRAPH_STORAGE === 'sqlite' ? 'sqlite' : 'json');
+  if (storageType === 'sqlite') {
     const freshlyCreated = await stat(file).then(() => false, (error) => { if (error.code === 'ENOENT') return true; throw error; });
     const { createSqliteStore } = await import('./sqlite-storage.js');
     const store = await createSqliteStore(file, {
-      restoreValidator: options.restoreValidator,
-      restoreFault: options.restoreFault,
-      restoreFs: options.restoreFs,
-      saveFault: options.saveFault,
-      signal: options.signal,
-      lockTimeoutMs: options.lockTimeoutMs,
-      staleLockMs: options.staleLockMs,
-      lockPollIntervalMs: options.lockPollIntervalMs,
-      env: options.env
+      restoreValidator: opts.restoreValidator,
+      restoreFault: opts.restoreFault,
+      restoreFs: opts.restoreFs,
+      saveFault: opts.saveFault,
+      signal: opts.signal,
+      lockTimeoutMs: opts.lockTimeoutMs,
+      staleLockMs: opts.staleLockMs,
+      lockPollIntervalMs: opts.lockPollIntervalMs,
+      env: opts.env
     });
     // The `./storage` restore is the restore wrapper around the unchanged
     // primitive, which takes the store fence itself (PR-37c design §3.3): step
@@ -252,22 +279,22 @@ export async function createStorage(options = {}) {
     // primitive (d37a F18). `verifier` is the wrapper's own option.
     const restore = store.restore;
     const io = storeIo(store);
-    store.restore = (source, restoreOptions = {}) => restoreLock(file, options).run(async () => {
+    store.restore = (source, restoreOptions = {}) => restoreLock(file, opts).run(async () => {
       await asRestoreRefusal(resolvePendingRestore(io, { verifier: restoreOptions.verifier, beforeResolve: retentionRestoreGuard(source, file, 'sqlite') }));
       const ctx = restoreContext({
-        source, destination: file, env: options.env, verifier: restoreOptions.verifier, backend: 'sqlite', freshlyCreated,
+        source, destination: file, env: opts.env, verifier: restoreOptions.verifier, backend: 'sqlite', freshlyCreated,
         instant: restoreOptions.now ?? new Date().toISOString(), read: () => io.run(({ read }) => read(), { held: true })
       });
-      const callerValidate = restoreOptions.validate === options.restoreValidator ? undefined : restoreOptions.validate;
+      const callerValidate = restoreOptions.validate === opts.restoreValidator ? undefined : restoreOptions.validate;
       let result;
       try { result = await restore(source, { ...restoreOptions, validate: restoreHook(ctx, callerValidate), afterReplace: activation(ctx, restoreOptions.afterReplace) }); }
       catch (error) {
         await settleAfterFailure(io, ctx);
         throw error;
       }
-      return completeRestore(io, ctx, result, restoreOptions.afterReplace, { load: () => store.load(), restoreFault: options.restoreFault });
+      return completeRestore(io, ctx, result, restoreOptions.afterReplace, { load: () => store.load(), restoreFault: opts.restoreFault });
     });
     return store;
   }
-  return createJsonFileStore(file, options);
+  return createJsonFileStore(file, opts);
 }

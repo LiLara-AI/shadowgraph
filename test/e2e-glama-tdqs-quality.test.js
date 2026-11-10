@@ -523,7 +523,7 @@ test('Tier 2: Boundary & Quality - Aggregate profile description budgets and emp
     full: 11950,
     verifier: 12300,
     workflow: 7950,
-    compact: 6900
+    compact: 6375
   };
 
   const measured = {

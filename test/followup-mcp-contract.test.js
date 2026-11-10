@@ -183,13 +183,14 @@ for (const modern of [false, true]) {
   test(`${era} MCP calls reject missing required write fields with safe coded failures`, async (t) => {
     const rpc = await startMcp(t);
     for (const [name, arguments_, fieldPath] of [
-      ['shadowgraph_record_attempt', { project: 'p', solution: 'parallel import', result: 'rate limited' }, 'resultClass'],
+      ['shadowgraph_record_attempt', { project: 'p', result: 'rate limited' }, 'solution'],
+      ['shadowgraph_record_attempt', { project: 'p', solution: 'parallel import' }, 'result'],
       ['shadowgraph_record_fact', { project: 'p', key: 'apiRateLimitPerMin' }, 'value']
     ]) {
       const response = await rpc.call(toolRequest(`${era}-missing-${fieldPath}`, name, arguments_, { modern }));
       assertSafeToolFailure(response, {
         modern,
-        message: 'Tool execution failed (missing_required_field)',
+        message: `Tool execution failed (missing_required_field): field "${fieldPath}" is required`,
         data: { issueCode: 'missing_required_field', fieldPath, retryable: false }
       });
     }
@@ -203,6 +204,7 @@ for (const modern of [false, true]) {
       name: 'shadowgraph_update_status',
       arguments_: { decisionId: `${era}-PRIVATE-UNKNOWN-DECISION-5e6f`, status: 'planned' },
       expected: { issueCode: 'unknown_decision', fieldPath: 'decisionId', retryable: false },
+      expectedMessage: 'Tool execution failed (unknown_decision): field "decisionId" refers to an unknown decision',
       forbidden: [`${era}-PRIVATE-UNKNOWN-DECISION-5e6f`, 'Decision not found', privatePath, stackText]
     },
     {
@@ -211,6 +213,7 @@ for (const modern of [false, true]) {
       arguments_: { decisionId: `${era}-PRIVATE-INVALID-STATUS-DECISION-7a8b`, status: 'PRIVATE-RAW-STATUS-9c0d' },
       seedDecision: true,
       expected: { issueCode: 'invalid_field', fieldPath: 'status', retryable: false },
+      expectedMessage: 'Tool execution failed (invalid_field): field "status" must be one of: proposed, planned, in_progress, executed, validated, failed, reconsidered, abandoned, archived',
       forbidden: [`${era}-PRIVATE-INVALID-STATUS-DECISION-7a8b`, 'PRIVATE-RAW-STATUS-9c0d', 'Invalid decision status:', privatePath, stackText]
     },
     {
@@ -223,6 +226,7 @@ for (const modern of [false, true]) {
         resultClass: `PRIVATE-${era}-RESULT-CLASS-5c6d`
       },
       expected: { issueCode: 'invalid_field', fieldPath: 'resultClass', retryable: false },
+      expectedMessage: 'Tool execution failed (invalid_field): field "resultClass" must be one of: failed, succeeded, inconclusive',
       forbidden: [`PRIVATE-${era}-SOLUTION-1e2f`, `PRIVATE-${era}-RESULT-3a4b`, `PRIVATE-${era}-RESULT-CLASS-5c6d`, 'Attempt resultClass must be ', privatePath, stackText]
     },
     {
@@ -232,6 +236,7 @@ for (const modern of [false, true]) {
       seedDecision: true,
       initialStatus: 'planned',
       expected: { issueCode: 'illegal_transition', fieldPath: 'status', retryable: false },
+      expectedMessage: 'Tool execution failed (illegal_transition): field "status" specifies an illegal status transition',
       forbidden: [`${era}-PRIVATE-ILLEGAL-TRANSITION-DECISION-7e8f`, 'Illegal decision status transition:', 'planned -> validated', 'validated', privatePath, stackText]
     }
   ];
@@ -260,12 +265,73 @@ for (const modern of [false, true]) {
       const response = await rpc.call(toolRequest(`${era}-${scenario.label}`, scenario.name, arguments_, { modern }));
       assertSafeToolFailure(response, {
         modern,
-        message: `Tool execution failed (${scenario.expected.issueCode})`,
+        message: scenario.expectedMessage,
         data: scenario.expected,
         forbidden: scenario.forbidden
       });
     });
   }
+
+  test(`${era} MCP shadowgraph_record_attempt without resultClass succeeds and classifies via wording heuristic`, async (t) => {
+    const rpc = await startMcp(t);
+
+    const failResp = await rpc.call(toolRequest(`${era}-attempt-fail`, 'shadowgraph_record_attempt', {
+      project: 'p',
+      solution: 'scale worker pool',
+      result: 'out of memory error occurred'
+    }, { modern }));
+    assert.equal(failResp.error, undefined, failResp.error?.message);
+    if (modern) assert.equal(failResp.result?.isError, false);
+    const failAttempt = JSON.parse(failResp.result.content[0].text);
+    assert.ok(failAttempt.id);
+    assert.equal(failAttempt.kind, 'attempt');
+    assert.equal(failAttempt.solution, 'scale worker pool');
+    assert.equal(failAttempt.result, 'out of memory error occurred');
+    assert.equal(failAttempt.resultClass, undefined);
+
+    const passResp = await rpc.call(toolRequest(`${era}-attempt-pass`, 'shadowgraph_record_attempt', {
+      project: 'p',
+      solution: 'add index to user_id',
+      result: 'query throughput increased 4x'
+    }, { modern }));
+    assert.equal(passResp.error, undefined, passResp.error?.message);
+    if (modern) assert.equal(passResp.result?.isError, false);
+    const passAttempt = JSON.parse(passResp.result.content[0].text);
+    assert.ok(passAttempt.id);
+    assert.equal(passAttempt.resultClass, undefined);
+
+    const ctxResp = await rpc.call(toolRequest(`${era}-attempt-ctx`, 'shadowgraph_context', {
+      project: 'p'
+    }, { modern }));
+    assert.equal(ctxResp.error, undefined, ctxResp.error?.message);
+    const context = JSON.parse(ctxResp.result.content[0].text);
+    const failedIds = (context.failedAttempts ?? []).map((a) => a.id);
+    assert.ok(failedIds.includes(failAttempt.id), 'failure-worded attempt must appear in failedAttempts');
+    assert.ok(!failedIds.includes(passAttempt.id), 'success-worded attempt must NOT appear in failedAttempts');
+  });
+
+  test(`${era} MCP shadowgraph_record_attempt with explicit resultClass overrides wording heuristic`, async (t) => {
+    const rpc = await startMcp(t);
+    const resp = await rpc.call(toolRequest(`${era}-attempt-override`, 'shadowgraph_record_attempt', {
+      project: 'p',
+      solution: 'run migration batch',
+      result: 'batch finished without error',
+      resultClass: 'failed',
+      reason: 'corrupted index state discovered post-run'
+    }, { modern }));
+    assert.equal(resp.error, undefined, resp.error?.message);
+    if (modern) assert.equal(resp.result?.isError, false);
+    const attempt = JSON.parse(resp.result.content[0].text);
+    assert.equal(attempt.resultClass, 'failed');
+
+    const ctxResp = await rpc.call(toolRequest(`${era}-attempt-override-ctx`, 'shadowgraph_context', {
+      project: 'p'
+    }, { modern }));
+    assert.equal(ctxResp.error, undefined, ctxResp.error?.message);
+    const context = JSON.parse(ctxResp.result.content[0].text);
+    const failedIds = (context.failedAttempts ?? []).map((a) => a.id);
+    assert.ok(failedIds.includes(attempt.id), 'explicitly failed attempt must appear in failedAttempts');
+  });
 }
 
 test('legacy MCP returns the generic safe response for a non-Error throw with a non-string message', async (t) => {
@@ -855,7 +921,7 @@ for (const modern of [false, true]) {
     ));
     assertSafeToolFailure(malformedStatus, {
       modern,
-      message: 'Tool execution failed (invalid_field)',
+      message: 'Tool execution failed (invalid_field): field "status" must be one of: proposed, planned, in_progress, executed, validated, failed, reconsidered, abandoned, archived',
       data: { issueCode: 'invalid_field', fieldPath: 'status', retryable: false },
       forbidden: [statusSentinel, `${era}-status-owner`, 'Invalid decision status']
     });
