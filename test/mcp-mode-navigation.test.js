@@ -60,6 +60,7 @@ test('tool choice explains working context, lookup, expansion, evaluation and ma
   assert.match(desc('ack_review'), /shadowgraph_review_context/u);
   assert.match(byName.shadowgraph_context.inputSchema.properties.compact.description, /tool.*mode/u);
   assert.match(byName.shadowgraph_expand.inputSchema.description, /scope.*top level/u);
+  assert.ok(byName.shadowgraph_search.inputSchema.properties.kind.enum.includes('fact'));
   assert.doesNotMatch(byName.shadowgraph_context.outputSchema.properties.relevant.properties.processing.description, /inactive in this build/u);
 });
 

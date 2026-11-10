@@ -166,7 +166,7 @@ const decisionIdProperty = { type: 'string', description: 'Identifier of an exis
 const changedFactsProperty = { type: 'array', items: { type: 'string' }, description: 'Non-persisted string[] of changed fact keys firing plain string reopenWhen rules (e.g. ["budget"]); non-strings error. Symbolic strings ("key >= value") and object rules read values from stored facts or facts overrides instead.' };
 const factsOverrideProperty = { type: 'object', description: 'Non-persisted {key:value} map overriding stored facts for object rules (e.g. {ready:true}); arrays/non-objects error. Unlisted keys read active stored facts; string rules require changedFacts.' };
 const statusFilterProperty = { type: 'string', enum: [...DECISION_STATUSES], description: 'Return only decisions in this lifecycle state. A structured filter, so matching it is never counted as a content match.' };
-const kindFilterProperty = { type: 'string', enum: ['decision', 'attempt'], description: 'Restrict results to decisions or to attempts. A structured filter, never a content match.' };
+const kindFilterProperty = { type: 'string', enum: ['decision', 'attempt', 'fact'], description: 'Restrict results to decisions, attempts, or facts. A structured filter, never a content match.' };
 const sourceClassFilterProperty = { type: 'string', enum: [...SOURCE_CLASSES], description: 'Return only records carrying this claimed origin class. A structured filter, never a content match.' };
 const minConfidenceProperty = { type: 'number', minimum: 0, maximum: 1, description: 'Return only decisions whose current confidence is at least this value, 0-1. A structured filter, never a content match.' };
 
@@ -809,11 +809,11 @@ const ACCESS_DESCRIPTIONS = {
   shadowgraph_review: {"does": "Evaluate open project decisions against current facts, persist due review signals, and return { items, completeness }.", "route": "Use shadowgraph_review_signals to inspect the saved signal queue, shadowgraph_review_context for check-in, or shadowgraph_ack_review to close.", "effects": "Skips closed decisions. Saves owned signals deduped by decision/reason/coverage and commits a revision; grants widen reads; no status changes.", "returns": ""},
   shadowgraph_search: {"does": "Match records containing every literal query term as direct content matches. Supports Arabic stemming across records.", "route": "Use shadowgraph_retrieve for graph neighbours, or shadowgraph_recall for ranked memory (shadowgraph_recall ranks by vector).", "returns": "\"a b\" requires both terms, not an exact phrase; matchMode:\"partial\" gives 3+ terms fallback; empty query filters.", "effects": "Own-scope read saves nothing; an access key commits a revision and audit."},
   shadowgraph_context: {"does": "Read a read-only session startup working set: activeDecisions, staleAssumptions, failedAttempts, belowConfidenceThreshold, and task digest.", "route": "shadowgraph_expand dereferences compact:true handles; shadowgraph_review_context persists review signals; shadowgraph_search queries records.", "effects": "No decision or signal writes; asOf scopes relevant items. Own-scope read saves nothing; an access key commits a revision and audit."},
-  shadowgraph_review_context: {"does": "Load the turn check-in working set (activeDecisions, openReviews, suggestedQuestions) with synchronized reviewSignalId handles.", "route": "Use when check-in must persist signals; shadowgraph_context saves no signals; shadowgraph_review checks due items only.", "effects": "Skips closed decisions. Deduplicates owned signals by decision/reason/coverage and commits a revision storing signals; grants widen reads; no status changes."},
+  shadowgraph_review_context: {"does": "Load the turn check-in working set (activeDecisions, openReviews, suggestedQuestions) with synchronized reviewSignalId handles.", "route": "Use when check-in must persist signals; shadowgraph_context saves no signals; shadowgraph_review also persists signals and returns due items only.", "effects": "Skips closed decisions. Deduplicates owned signals by decision/reason/coverage and commits a revision storing signals; grants widen reads; no status changes."},
   shadowgraph_recall: {"does": "Rank relevant scoped memory (userId, agentId, runId, memoryType) by fused lexical, vector, graph and temporal RRF signals.", "route": "Write scoped memories first with shadowgraph_remember; use shadowgraph_search for unranked keyword matches.", "returns": "Returns scores and available signals; no provider/vector means no semantic ranking. Omitted memory scope fields select null, not any user/run.", "effects": "Own-scope read saves nothing; an access key commits a revision and audit."},
   shadowgraph_maintain: {"does": "Age overdue owned decisions past reviewAfter to stale and expire owned facts past expiresAt against now.", "route": "Use shadowgraph_validate for integrity checks or shadowgraph_review for rules; Maintenance does not repair or restore.", "effects": "Mutates owned records only; repeat runs commit a revision without re-aging; accessId widens reads only.", "returns": ""},
   shadowgraph_retrieve: {"does": "Retrieve seed records matching every query term plus their ordered graph neighbours. Queries match Arabic stem forms.", "route": "Use shadowgraph_search for flat keyword hits without graph neighbours, or shadowgraph_recall when ranking memories (shadowgraph_recall ranks by vector).", "returns": "Every term must match a seed; neighbours need not match, and matchMode allows 3+ terms fallback on seeds.", "effects": "Own-scope read saves nothing; an access key commits a revision and audit."},
-  shadowgraph_expand: {"does": "Expand a recordId and revision digest handle from shadowgraph_context into the full current record and rival records.", "route": "shadowgraph_context supplies the handle; use shadowgraph_search or shadowgraph_retrieve for text queries.", "returns": "Flatten scope to top level. Stale digest yields revision_changed; purged yields purged; missing or out-of-scope yields unavailable.", "effects": "Own-scope read saves nothing; an access key commits a revision and audit."},
+  shadowgraph_expand: {"does": "Expand a recordId and revision digest handle from shadowgraph_context into the full current record and rival records.", "route": "shadowgraph_context supplies the handle; use shadowgraph_search or shadowgraph_retrieve for text queries.", "returns": "input: copy line.expansion. Stale digest yields revision_changed; purged yields purged; missing or out-of-scope yields unavailable.", "effects": "Own-scope read saves nothing; an access key commits a revision and audit."},
   shadowgraph_validate: {"does": "Diagnose record, graph and journal integrity without applying repairs.", "route": "shadowgraph_maintain ages records; shadowgraph_review checks decision rules; shadowgraph_repair_plan proposes repairs; shadowgraph_rebuild checks journal replay.", "effects": "Own-scope read saves nothing; an access key commits a revision and audit."},
   shadowgraph_reconsider: {"does": "Audit one decision by decisionId (or project): explain all reopen verdicts (grounded, contested, unevaluated).", "route": "Use shadowgraph_review to queue signals, or shadowgraph_supersede to replace it.", "effects": "Rejects unknown, out-of-scope or closed decisionId. Commits an audit revision without changing decision status; grants widen reads only.", "returns": "review_recommended: condition fired; manual_review: unresolved evidence; unchanged: complete, no trigger."},
 };
@@ -1306,7 +1306,7 @@ const CATALOG = [
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     describe: {
       does: 'Record one attempt with its solution and result, returning the stored attempt.',
-      route: 'Use shadowgraph_record_decision for a choice, shadowgraph_record_outcome to update a decision, or shadowgraph_record_fact for an observation.',
+      route: 'Link relatedTo to an existing decision. shadowgraph_record_decision records choices, shadowgraph_record_outcome updates one, shadowgraph_record_fact records facts.',
       effects: 'Appends an attempt and journal entry and commits a revision; idempotencyKey deduplicates retries (conflicts error); resultClass overrides wording.'
     },
     inputSchema: {
@@ -1347,7 +1347,7 @@ const CATALOG = [
     inputSchema: {
       type: 'object',
       properties: {
-        project: { type: 'string', description: 'Review only this project. Omit to review every project.' },
+        project: projectProperty,
         changedFacts: changedFactsProperty,
         facts: factsOverrideProperty
       }
@@ -1371,7 +1371,7 @@ const CATALOG = [
         query: { type: 'string', description: `Whitespace-separated terms, matched case-insensitively as substrings against the declared content fields (${CONTENT_FIELD_LIST}). Every term must match something, so more terms narrow the result. Omit to filter without searching.` },
         matchMode: { type: 'string', enum: ['all', 'partial', 'any'], description: 'Term matching strategy: all (default, require every term), partial (allow term subset with 3+ terms), or any.' },
         expandSynonyms: { type: 'boolean', description: 'Expand query terms with bilingual English and Arabic synonyms and morphological variants.' },
-        project: { type: 'string', description: 'Restrict to one project. Omitted, decisions and facts are searched across projects, while memories stay in the default project and all-null scope.' },
+        project: projectProperty,
         status: statusFilterProperty,
         kind: kindFilterProperty,
         sourceClass: sourceClassFilterProperty,
@@ -1712,7 +1712,7 @@ const CATALOG = [
       does: 'Expand a recordId and revision digest handle from shadowgraph_context into the full current record and rival records.',
       route: 'shadowgraph_context supplies the handle; use shadowgraph_search or shadowgraph_retrieve for text queries.',
       effects: 'Reads only. A stale digest yields revision_changed; purged yields purged; missing or out-of-scope yields unavailable.',
-      returns: 'Flatten scope to top level. Stale digest yields revision_changed; purged yields purged; missing or out-of-scope yields unavailable.'
+      returns: 'input: copy line.expansion. Stale digest yields revision_changed; purged yields purged; missing or out-of-scope yields unavailable.'
     },
     inputSchema: {
       type: 'object',

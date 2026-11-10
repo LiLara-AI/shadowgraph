@@ -212,7 +212,7 @@ const INPUT_CONSTRAINTS_EXPECTED = {
   shadowgraph_record_decision: { required: ['title', 'chosen'], enums: {} },
   shadowgraph_record_attempt: { required: ['solution', 'result'], enums: { resultClass: ['failed', 'succeeded', 'inconclusive'] } },
   shadowgraph_review: { required: null, enums: {} },
-  shadowgraph_search: { required: null, enums: { kind: ['decision', 'attempt'] } },
+  shadowgraph_search: { required: null, enums: { kind: ['decision', 'attempt', 'fact'] } },
   shadowgraph_context: { required: null, enums: {} },
   shadowgraph_review_context: { required: null, enums: {} },
   shadowgraph_remember: { required: null, enums: {} },
@@ -228,7 +228,7 @@ const INPUT_CONSTRAINTS_EXPECTED = {
   shadowgraph_redact: { required: null, enums: {} },
   shadowgraph_purge: { required: ['project'], enums: { mode: ['logical', 'hard'] } },
   shadowgraph_maintain: { required: null, enums: {} },
-  shadowgraph_retrieve: { required: null, enums: { kind: ['decision', 'attempt'] } },
+  shadowgraph_retrieve: { required: null, enums: { kind: ['decision', 'attempt', 'fact'] } },
   shadowgraph_validate: { required: null, enums: {} },
   shadowgraph_journal: { required: null, enums: {} },
   shadowgraph_rebuild: { required: null, enums: {} },
@@ -1002,8 +1002,8 @@ test('output schemas accept data imported from an older storage schema', () => {
   owned.importData(legacyData('legacy-app'));
   const read = { project: 'legacy-app' };
   const [searched, retrieved, recalled, context] = [owned.search('', read), owned.retrieve('', read), owned.recall('', read), owned.context(read)];
-  assert.deepEqual(searched.items.map((item) => item.record.id), ['legacy-attempt-1', 'legacy-decision-1'], 'the core reads do read the legacy records');
-  assert.equal(retrieved.items.some((item) => item.record.id === 'legacy-fact-1' && item.matchedBy === 'graph'), true);
+  assert.deepEqual(searched.items.map((item) => item.record.id), ['legacy-attempt-1', 'legacy-decision-1', 'legacy-fact-1'], 'the core reads include legacy decisions, attempts and facts');
+  assert.equal(retrieved.items.some((item) => item.record.id === 'legacy-fact-1'), true, 'retrieve returns the legacy fact as a direct filter match');
   assert.equal(recalled.items.length, 3);
   assert.deepEqual([context.activeDecisions.length, context.failedAttempts.length], [1, 1]);
   const traversed = owned.traverse({ id: 'legacy-decision-1', ...read });

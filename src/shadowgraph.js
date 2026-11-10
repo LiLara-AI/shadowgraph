@@ -346,7 +346,8 @@ const MEMORY_STATUSES = Object.freeze(['active', 'superseded', 'invalidated']);
 // confidence field. See search-contract.md.
 export const CONTENT_SEARCH_FIELDS = Object.freeze([
   'title', 'goal', 'chosen', 'assumption', 'evidence', 'alternative',
-  'attempt solution', 'attempt result', 'attempt reason', 'environment'
+  'attempt task', 'attempt solution', 'attempt result', 'attempt reason', 'environment',
+  'tags', 'changeSummary', 'outcome lessons', 'fact key', 'fact value'
 ]);
 // Structured filters. Matching one of these NEVER counts as a content match.
 export const SEARCH_FILTERS = Object.freeze(['project', 'status', 'minConfidence', 'sourceClass', 'kind']);
@@ -5662,7 +5663,8 @@ export function createShadowGraph(options = {}) {
       return [...fields];
     };
     const hits = [];
-    for (const record of records.values()) {
+    const candidates = [...records.values(), ...facts.values()];
+    for (const record of candidates) {
       if (!matchesFilters(record, options, boundary)) continue;
       if (record.kind === 'memory' && !sameMemoryScopeValues(record.scope, memoryScope)) continue;
       // G7: a term must match a DECLARED CONTENT FIELD. Schema keys and internal
@@ -5687,7 +5689,7 @@ export function createShadowGraph(options = {}) {
       const minMatchedTerms = (options.matchMode === 'partial' || options.matchMode === 'any')
         ? 1
         : Math.max(2, terms.length - 1);
-      for (const record of records.values()) {
+      for (const record of candidates) {
         if (!matchesFilters(record, options, boundary)) continue;
         if (record.kind === 'memory' && !sameMemoryScopeValues(record.scope, memoryScope)) continue;
         const perTerm = terms.map((term) => expandTermMatches(record, term, { includeSynonyms: usePartialSynonyms }));
@@ -8128,6 +8130,12 @@ function matchFields(record, needle) {
   return matchFieldsWith(record, needle, (value) => foldForMatch(value).includes(needle));
 }
 
+function factValueMatches(value, has) {
+  if (Array.isArray(value)) return value.some((item) => factValueMatches(item, has));
+  if (value && typeof value === 'object') return Object.values(value).some((item) => factValueMatches(item, has));
+  return has(value);
+}
+
 function matchFieldsWith(record, needle, has) {
   const fields = [];
   if (has(record.title)) fields.push('title');
@@ -8144,6 +8152,10 @@ function matchFieldsWith(record, needle, has) {
   if (has(record.result)) fields.push('attempt result');
   if (has(record.reason)) fields.push('attempt reason');
   if (has(record.environment)) fields.push('environment');
+  if (record.kind === 'fact' || (record.kind === undefined && typeof record.key === 'string' && Object.hasOwn(record, 'value'))) {
+    if (has(record.key)) fields.push('fact key');
+    if (factValueMatches(record.value, has)) fields.push('fact value');
+  }
   return fields;
 }
 
