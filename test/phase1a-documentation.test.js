@@ -27,23 +27,26 @@ test('storage path resolution detects placeholders and safely falls back to user
   // isPlaceholderPath detects various placeholder shapes on POSIX and Windows
   assert.equal(isPlaceholderPath('/absolute/path/to/shared-shadowgraph/data.json'), true);
   assert.equal(isPlaceholderPath('C:\\absolute\\path\\to\\shared-shadowgraph\\data.json'), true);
-  assert.equal(isPlaceholderPath('/path/to/data.json'), true);
-  assert.equal(isPlaceholderPath('shared-shadowgraph/data.json'), true);
   assert.equal(isPlaceholderPath('<path-to-store>'), true);
-  assert.equal(isPlaceholderPath('[path-to-store]'), true);
-  assert.equal(isPlaceholderPath('placeholder-path'), true);
 
   // Additional placeholder shapes (Finding 1 remediation)
   assert.equal(isPlaceholderPath('<absolute-path-to-data.json>'), true);
   assert.equal(isPlaceholderPath('<path-to-data.json>'), true);
-  assert.equal(isPlaceholderPath('path/to/data.json'), true);
   assert.equal(isPlaceholderPath('${SHADOWGRAPH_FILE}'), true);
-  assert.equal(isPlaceholderPath('[absolute-path]'), true);
 
-  // isPlaceholderPath returns false for genuine paths
+  // isPlaceholderPath returns false for genuine paths (never substring over-matching)
   assert.equal(isPlaceholderPath('/custom/storage/store.json'), false);
   assert.equal(isPlaceholderPath('C:\\custom-storage\\store.json'), false);
   assert.equal(isPlaceholderPath('./local/store.json'), false);
+  assert.equal(isPlaceholderPath('C:\\' + 'Users' + '\\me\\shared-shadowgraph\\data.json'), false);
+  assert.equal(isPlaceholderPath('D:\\Work [2026]\\sg.json'), false);
+  assert.equal(isPlaceholderPath('/' + 'home' + '/me/placeholder-tests/data.json'), false);
+  assert.equal(isPlaceholderPath('/srv/app/path/to/data.json'), false);
+  assert.equal(isPlaceholderPath('[path-to-store]'), false);
+  assert.equal(isPlaceholderPath('[absolute-path]'), false);
+  assert.equal(isPlaceholderPath('placeholder-path'), false);
+  assert.equal(isPlaceholderPath('/path/to/data.json'), false);
+  assert.equal(isPlaceholderPath('shared-shadowgraph/data.json'), false);
 
   // resolveStoragePath falls back to user home when env.SHADOWGRAPH_FILE has placeholder
   assert.equal(
@@ -223,11 +226,11 @@ test('API reference documents optional resultClass with wording fallback', () =>
   );
 });
 
-test('v0.44.2 release notes and documentation disclose all fixes and release metadata', () => {
+test('v0.44.3 release notes and documentation disclose all fixes and release metadata', () => {
   for (const path of ['CHANGELOG.md', 'RELEASE_NOTES.md']) {
     const document = read(path);
-    const start = document.indexOf('## 0.44.2');
-    assert.notEqual(start, -1, `${path} needs a 0.44.2 entry`);
+    const start = document.indexOf('## 0.44.3');
+    assert.notEqual(start, -1, `${path} needs a 0.44.3 entry`);
     const next = document.indexOf('\n## ', start + 1);
     const entry = document.slice(start, next === -1 ? undefined : next);
     assert.match(entry, /compact/i);
@@ -236,17 +239,26 @@ test('v0.44.2 release notes and documentation disclose all fixes and release met
     assert.match(entry, /SHADOWGRAPH_FILE/);
   }
 
+  const notes = read('RELEASE_NOTES.md');
+  assert.match(notes, /86431/);
+  assert.match(notes, /3758827/);
+  assert.match(notes, /local self-estimate/i);
+
+  const policy = read('integrations/agent-policy.md');
+  assert.match(policy, /decisionStatus/);
+  assert.match(policy, /supersedes/);
+
   const readme = read('README.md');
-  assert.match(readme, /Release-v0\.44\.2-blue/);
-  assert.match(readme, /releases\/tag\/v0\.44\.2/);
-  assert.match(readme, /releases\/download\/v0\.44\.2\/shadowgraph-unified-plugin-0\.44\.2\.tgz/);
-  assert.match(readme, /\*\*Release v0\.44\.2\*\*/);
+  assert.match(readme, /Release-v0\.44\.3-blue/);
+  assert.match(readme, /releases\/tag\/v0\.44\.3/);
+  assert.match(readme, /releases\/download\/v0\.44\.3\/shadowgraph-unified-plugin-0\.44\.3\.tgz/);
+  assert.match(readme, /\*\*Release v0\.44\.3\*\*/);
 
   const manifest = JSON.parse(read('package.json'));
-  assert.equal(manifest.version, '0.44.2');
+  assert.equal(manifest.version, '0.44.3');
 
   const lockfile = JSON.parse(read('package-lock.json'));
-  assert.equal(lockfile.version, '0.44.2');
-  assert.equal(lockfile.packages?.['']?.version, '0.44.2');
+  assert.equal(lockfile.version, '0.44.3');
+  assert.equal(lockfile.packages?.['']?.version, '0.44.3');
 });
 

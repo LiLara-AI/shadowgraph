@@ -8,24 +8,48 @@ import { refusePublicExport } from './internal/collections.js';
 import { DELETION_FILE_DESTINATION_REFUSED, DELETION_INTENT, DELETION_VIEW, attachDeletionView, canonicalPath, commitFile, deletionError, readUnfenced, recordGenerationChanges, refuseDeletionFileDestination, registerStoreIo, storeIo, writeSyncedFile } from './internal/deletion-knowledge.js';
 import { RestorePendingError, activation, asRestoreRefusal, completeRestore, freshPurgeIntents, purgeRecorded, recordPurges, resolvePendingRestore, restoreContext, restoreHook, retentionRestoreGuard, saveResolving, settleAfterFailure } from './internal/restore-wrapper.js';
 
+const SENTINEL_PATHS = new Set([
+  '/absolute/path/to/shared-shadowgraph/data.json',
+  '/absolute/path/to/shared-shadowgraph/data.db',
+  '/absolute/path/to/shared-shadowgraph/data.sqlite',
+  '/absolute/path/to/data.json',
+  '/absolute/path/to/data.db',
+  '/absolute/path/to/data.sqlite',
+  '/path/to/storage.json',
+  '/path/to/storage.db',
+  '/path/to/storage.sqlite',
+  '/' + 'home/user/.shadowgraph/data.json',
+  '/' + 'home/user/.shadowgraph/data.db',
+  '/' + 'home/user/.shadowgraph/data.sqlite',
+  '/' + 'users/user/.shadowgraph/data.json',
+  '/' + 'users/user/.shadowgraph/data.db',
+  '/' + 'users/user/.shadowgraph/data.sqlite'
+]);
+
 export function isPlaceholderPath(val) {
   if (typeof val !== 'string' || !val.trim()) return false;
   const trimmed = val.trim();
-  if (/(<[^>]*>|\[[^\]]*\]|\$\{[^}]*\}|^<)/.test(trimmed)) return true;
+  // 1. Clearly unexpanded variable template syntax: ${VAR} or ${env:VAR}
+  if (/\$\{[^}]+\}/.test(trimmed)) return true;
+  // 2. Unexpanded shell template variable syntax: $VAR or $VAR/path
+  if (/(?:^|[\\/])\$[A-Za-z_][A-Za-z0-9_]*(?:[\\/]|$)/.test(trimmed)) return true;
+  // 3. Unexpanded Windows cmd template variable syntax: %VAR%
+  if (/%[A-Za-z_][A-Za-z0-9_]*%/.test(trimmed)) return true;
+  // 4. Clearly unexpanded whole-segment angle bracket placeholders
+  if (trimmed.startsWith('<') && trimmed.endsWith('>')) return true;
+  const segments = trimmed.split(/[/\\]+/);
+  if (segments.some((seg) => seg.startsWith('<') && seg.endsWith('>') && seg.length > 2)) {
+    return true;
+  }
+  // 5. Exact shipped template sentinels (cross-platform slashes, case-insensitive, optional Windows drive, optional leading ~)
   const normalized = trimmed
     .replace(/\\/g, '/')
     .replace(/\/+/g, '/')
+    .replace(/^[a-zA-Z]:/, '')
+    .replace(/^~(?:\/|$)/, '/')
     .toLowerCase();
-  return (
-    normalized.includes('absolute/path') ||
-    normalized.includes('shared-shadowgraph') ||
-    normalized.includes('path/to/') ||
-    normalized.includes('your-path') ||
-    normalized.includes('your_path') ||
-    normalized.includes('placeholder') ||
-    normalized.includes('<path') ||
-    normalized.includes('[path')
-  );
+  const withLeading = normalized.startsWith('/') ? normalized : '/' + normalized;
+  return SENTINEL_PATHS.has(withLeading);
 }
 
 export function resolveStoragePath(explicitFile, options = {}) {
@@ -42,9 +66,17 @@ export function resolveStoragePath(explicitFile, options = {}) {
   const home = opts.homedir ?? env?.SHADOWGRAPH_HOME ?? homedir();
   const defaultHomePath = home ? join(home, '.shadowgraph', ext) : localPath;
   if (isPlaceholderPath(fileArg) || isPlaceholderPath(envFile)) {
+    const placeholder = (typeof fileArg === 'string' && isPlaceholderPath(fileArg)) ? fileArg.trim() : envFile.trim();
+    const stderrStream = opts.stderr ?? process.stderr;
+    stderrStream?.write?.(`[shadowgraph] Warning: storage path "${placeholder}" is a template placeholder; falling back to "${defaultHomePath}"\n`);
     return defaultHomePath;
   }
-  if (opts.preferLocal || existsSync(localPath)) return localPath;
+  if (opts.preferLocal) return localPath;
+  const hasExplicitHome = Boolean(opts.homedir || env?.SHADOWGRAPH_HOME);
+  const hasExplicitCwd = Boolean(opts.cwd);
+  if ((hasExplicitCwd && existsSync(localPath)) || (!hasExplicitHome && existsSync(localPath))) {
+    return localPath;
+  }
   return defaultHomePath;
 }
 

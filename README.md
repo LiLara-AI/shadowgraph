@@ -5,9 +5,9 @@
 ShadowGraph records what worked, what failed, and why a decision was made—then supplies relevant experience when you continue working. The demonstrated automatic paths are the **Windows Codex terminal wrapper** and, in print mode, **Claude Code CLI hooks on Windows**, after one-time setup in projects you enroll.
 
 [![CI](https://github.com/LiLara-AI/shadowgraph/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/LiLara-AI/shadowgraph/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/badge/Release-v0.44.2-blue)](https://github.com/LiLara-AI/shadowgraph/releases/tag/v0.44.2)
+[![Release](https://img.shields.io/badge/Release-v0.44.3-blue)](https://github.com/LiLara-AI/shadowgraph/releases/tag/v0.44.3)
 
-[Get started](#quick-start-windows-codex) · [Supported workflows](#supported-workflows) · [Release & downloads](https://github.com/LiLara-AI/shadowgraph/releases/tag/v0.44.2) · [Documentation](#documentation)
+[Get started](#quick-start-windows-codex) · [Supported workflows](#supported-workflows) · [Release & downloads](https://github.com/LiLara-AI/shadowgraph/releases/tag/v0.44.3) · [Documentation](#documentation)
 
 ![Session A works and repairs a failure; capture feeds background extraction through the selected provider; local memory supplies relevant experience to fresh Session B. Foreground work continues and cross-project reuse requires explicit sharing.](https://raw.githubusercontent.com/LiLara-AI/shadowgraph/v0.43.1/docs/assets/workflow.svg)
 
@@ -33,10 +33,10 @@ The Codex executor is a separate prerequisite distributed as `@openai/codex`. Sh
 
 ### 1. Install
 
-Run in PowerShell 7+. The version is pinned; the [release](https://github.com/LiLara-AI/shadowgraph/releases/tag/v0.44.2) includes `SHA256SUMS.txt` for the tarball.
+Run in PowerShell 7+. The version is pinned; the [release](https://github.com/LiLara-AI/shadowgraph/releases/tag/v0.44.3) includes `SHA256SUMS.txt` for the tarball.
 
 ```powershell
-npm install --global https://github.com/LiLara-AI/shadowgraph/releases/download/v0.44.2/shadowgraph-unified-plugin-0.44.2.tgz
+npm install --global https://github.com/LiLara-AI/shadowgraph/releases/download/v0.44.3/shadowgraph-unified-plugin-0.44.3.tgz
 
 $executorDir = Join-Path $env:LOCALAPPDATA 'ShadowGraph-Codex-0.161.0'
 npm install --prefix $executorDir @openai/codex@0.161.0
@@ -250,6 +250,8 @@ sequenceDiagram
 | **Access Governance & Delegation**| ❌ | ❌ | ✅ | `shadowgraph_request_wider_access`, `shadowgraph_bind`, `attribute` |
 | **External Fact Verification** | ❌ | ❌ | Optional (36th) | `shadowgraph_verify_fact` |
 
+> **Compact Profile Lifecycle Note**: In compact profile (`SHADOWGRAPH_MCP_COMPACT=1`), complete decision lifecycle and supersession are fully supported without dedicated tools: use `shadowgraph_record_outcome` with `decisionStatus` (or `lifecycleStatus` / `autoTransition: true`) to transition lifecycle states, and `shadowgraph_record_decision` with `supersedes: [id]` to replace earlier decisions. Dedicated tools (`shadowgraph_update_status`, `shadowgraph_supersede`) are available only in workflow and full profiles.
+
 ### MCP Tool Selection & Disambiguation Guide
 
 | When you need to... | Use this tool | Do NOT use | Why? |
@@ -259,8 +261,8 @@ sequenceDiagram
 | Find a focal record and walk its immediate neighbors | `shadowgraph_retrieve` | `shadowgraph_traverse` | `retrieve` is available in Compact/Workflow; `traverse` requires Full mode and does multi-hop graph traversal (depth 1–10). |
 | Fetch immediate project working set and active conditions without writes | `shadowgraph_context` | `shadowgraph_review_context` | `context` is a read-only fast path saving nothing; `review_context` evaluates and commits review signals. |
 | Inspect pending review signals without triggering reevaluation | `shadowgraph_review_signals` | `shadowgraph_review` | `review_signals` inspects already stored signals (Workflow/Full); `review` runs live condition evaluations against all recorded facts. |
-| Replace an obsolete decision with an updated architectural choice | `shadowgraph_supersede` | `shadowgraph_record_outcome` | `supersede` preserves both decisions with an explicit superseded link; `record_outcome` validates or closes an existing decision without replacing it. |
-| Close out a decision after completing execution | `shadowgraph_record_outcome` | `shadowgraph_update_status` | `record_outcome` with `autoTransition: true` records lessons and advances lifecycle in one atomic call. |
+| Replace an obsolete decision with an updated architectural choice | `shadowgraph_supersede` (Workflow/Full) or `shadowgraph_record_decision` with `supersedes` (Compact) | `shadowgraph_record_outcome` | Dedicated `shadowgraph_supersede` (workflow/full) or `shadowgraph_record_decision(supersedes)` (compact) preserves both decisions with an explicit superseded link; `record_outcome` validates or closes an existing decision without replacing it. |
+| Close out a decision after completing execution | `shadowgraph_record_outcome` | `shadowgraph_update_status` | `record_outcome` with `autoTransition: true` or `decisionStatus` records lessons and advances lifecycle in one atomic call. Dedicated `shadowgraph_update_status` is available in workflow and full profiles. |
 
 Set the environment on the MCP server process, then restart/reconnect and refresh
 `tools/list`. There is no agent-callable mode switch. Workflow does not expose
@@ -324,7 +326,7 @@ Each host turn has a 120-second process limit. Background extraction has bounded
 
 For Claude Code CLI, delivered experience is not always applied: in one live run a fresh session received an earlier lesson and did not apply it. After extraction is deactivated and activated again, items left pending under the earlier setup are not extracted; status reports them as `priorSetup`. The Claude Code evidence is one Windows print-mode (`claude -p`) path, not every host.
 
-This is **Release v0.44.2**, not stable/GA. There are no claims of perfect semantic classification, universal language support, cost or time savings, superiority over native memory, or a human third-party security audit. See [release notes](RELEASE_NOTES.md), [security scope](SECURITY.md) and [benchmark status](docs/benchmark-report.md).
+This is **Release v0.44.3**, not stable/GA. There are no claims of perfect semantic classification, universal language support, cost or time savings, superiority over native memory, or a human third-party security audit. See [release notes](RELEASE_NOTES.md), [security scope](SECURITY.md) and [benchmark status](docs/benchmark-report.md).
 
 ## Upgrade and storage
 

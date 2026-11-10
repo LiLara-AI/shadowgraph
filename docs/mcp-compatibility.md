@@ -149,8 +149,7 @@ sequenceDiagram
 `SHADOWGRAPH_MCP_COMPACT=1` must be passed to the server process, not merely assumed from the Inspector launch shell. The automated gate uses Inspector's server environment option and verifies the returned list count.
 
 Compact mode keeps the recording, recall, context/expansion, review/acknowledgement and
-maintenance workflow. Decision status changes, decision supersession, keyed confidence evidence,
-and stored-signal inspection also exist in the opt-in workflow profile below. Graph traversal and repair/recovery remain full-mode operations.
+maintenance workflow. In compact profile (`SHADOWGRAPH_MCP_COMPACT=1`), hosts complete the full decision lifecycle using `shadowgraph_record_outcome` with `decisionStatus` (for lifecycle transitions) and `shadowgraph_record_decision` with `supersedes` (for supersession). Dedicated tools (`shadowgraph_update_status`, `shadowgraph_supersede`), keyed confidence evidence (`shadowgraph_confidence_evidence`), and stored-signal inspection (`shadowgraph_review_signals`) exist in the opt-in workflow profile below and full mode. Graph traversal and repair/recovery remain full-mode operations.
 Their implementations and stored data are not removed. Descriptions qualify full-only references,
 including references inside parameter and output schemas.
 
@@ -182,7 +181,9 @@ Example: record a decision and its reopen conditions; evaluate with `review` or
 `reconsider`; inspect its evidence; record a replacement with `record_decision`;
 call `supersede` with the old and new returned IDs; then `ack_review` with the
 returned **signal** ID. For unchanged choices, `update_status` can make a legal
-lifecycle transition. Acknowledgement alone never changes a decision. After a
+lifecycle transition. (In compact profile, replace `supersede` with `record_decision`
+passing `supersedes: [oldId]`, and update lifecycle status directly via `record_outcome`
+with `decisionStatus`.) Acknowledgement alone never changes a decision. After a
 restart, `review_signals` can recover open work without creating new signals.
 
 This addresses the compact workflow gap; it does not alter compact clients or

@@ -1,6 +1,6 @@
 # ShadowGraph release notes
 
-## 0.44.2 — Compact Lifecycle, Actionable Errors & Safe Integration Configurations (2026-11-10)
+## 0.44.3 — Compact Lifecycle, Actionable Errors & Safe Integration Configurations (2026-11-10)
 
 This release delivers the complete decision lifecycle in the compact MCP profile, actionable caller-facing tool validation errors with explicit field paths and enum hints, enhanced attempt parameter usability, and safe integration configuration fallbacks across client templates.
 
@@ -13,7 +13,7 @@ This release delivers the complete decision lifecycle in the compact MCP profile
 2. **Compact Tool Description Alignment & Route Verification (R2)**:
    - Removed all dangling references in compact tool descriptions pointing to tools excluded from the compact profile.
    - Added automated route verification tests ensuring every tool advertised in the compact profile references only callable tools.
-   - Preserved wire budgets and Glama TDQS quality scores within calibrated headroom limits.
+   - Preserved wire budgets and local Glama TDQS self-estimate quality scores within calibrated headroom limits.
 
 3. **Actionable Caller-Facing Validation Errors (R3)**:
    - Tool validation errors across all MCP profiles now include the offending `fieldPath` and actionable guidance (such as allowed enum values) directly in the caller-visible message text (`Tool execution failed (${issueCode}): field "${fieldPath}" ...`).
@@ -25,8 +25,21 @@ This release delivers the complete decision lifecycle in the compact MCP profile
    - Preserved wording-based failure heuristic in context when `resultClass` is omitted, while enforcing strict validation against `['failed', 'succeeded', 'inconclusive']` when explicitly supplied.
 
 5. **Safe Integration Configurations & Storage Fallback (R5)**:
-   - Enhanced `src/storage.js` to detect placeholder paths in `SHADOWGRAPH_FILE` (e.g. `/absolute/path/to/`, Windows backslash placeholders, bracketed placeholders) and safely fall back to `~/.shadowgraph/data.json`, preventing root drive pollution.
+   - Enhanced storage path resolution in `src/storage.js` to detect exact shipped sentinels and unexpanded template syntax in `SHADOWGRAPH_FILE` (such as `/absolute/path/to/shared-shadowgraph/data.json`, `${VAR}`, or `<...>` whole segments) without over-matching real user paths (such as custom shared-shadowgraph directories or paths with brackets). When a placeholder is detected, it falls back to `~/.shadowgraph/data.json`, emits a clear stderr warning naming the fallback location, and surfaces the warning in `shadowgraph doctor`.
    - Sanitized integration templates (`integrations/*.mcp.*`) to omit dangerous placeholder paths by default, backed by clear documentation in `integrations/README.md`.
+
+### Versioning & Glama Naming History
+
+Glama already registered a release named `0.44.2` (release ID `86431`, built from commit `3758827` in a previous session). Shipping different code under GitHub tag `v0.44.2` would create a version collision, prevent clean publishing to Glama, and cause registry ambiguity.
+
+To ensure unambiguous artifact provenance and registry alignment:
+- The local unpushed tag `v0.44.2` has been deleted.
+- This release is cut and delivered as **v0.44.3**.
+- Version `0.44.3` is synchronized across `package.json`, `package-lock.json`, `README.md` badges and download links, `CHANGELOG.md`, `RELEASE_NOTES.md`, and test fixtures.
+
+### TDQS Metric Evaluation Notice
+
+Tool Definition Quality Score metrics cited in local testing (e.g. Mean TDQS = 5.00, Min TDQS = 4.60, Server Description Score = 4.80 calculated by `test/e2e-glama-tdqs-quality.test.js` under the Glama TDQS Specification 1.3 rubric) are strictly local self-estimates and specification calculations. They evaluate description quality, rubric criteria, and absence of dangling references locally, and do NOT represent a live Glama score until published to and read back from the live Glama service.
 
 ## 0.44.1 — Phase 1A Technical Preview (2026-11-09)
 

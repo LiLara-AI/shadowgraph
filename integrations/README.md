@@ -176,7 +176,10 @@ Run the local API with `shadowgraph serve`. The dashboard is served only from `h
 ```text
 Before work: context + recall/retrieve.
 During work: record decisions, evidence, alternatives, scoped memory, facts, attempts, and links.
+             (In compact profile, supersede an earlier choice via shadowgraph_record_decision with `supersedes`).
 After work: record outcome and status.
+            (In compact profile, update decision status via shadowgraph_record_outcome with `decisionStatus`;
+             dedicated shadowgraph_update_status and shadowgraph_supersede are available in workflow/full profiles).
 When conditions change: persist the changed fact, restart if needed, then review stored state.
 ```
 
