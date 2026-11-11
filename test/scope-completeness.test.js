@@ -140,8 +140,8 @@ test('PR-11 HTTP and CLI serialize coverage, including doctor count projection',
   await run('setup');
   assert.equal((await run('signals')).completeness?.complete, false);
   const doctor = await run('doctor');
-  assert.equal(doctor.graph.completeness?.complete, false);
-  assert.equal(doctor.graph.limitation?.code, 'scoped_coverage');
+  assert.equal(doctor.graph.completeness?.complete, true);
+  assert.equal(doctor.graph.limitation, undefined);
 });
 
 test('PR-11 dashboard renders object metadata as JSON through text content', async () => {
