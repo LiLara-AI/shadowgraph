@@ -2,7 +2,7 @@
 
 These interfaces store or retrieve records when called. For automatic capture and delivery, start with the [Windows Codex workflow](../README.md#quick-start-windows-codex).
 
-Install the current Technical Preview with `npm install --global github:LiLara-AI/shadowgraph#v0.44.3`. ShadowGraph is private and unpublished to the npm registry.
+The published Technical Preview is `v0.44.3`: install it with `npm install --global github:LiLara-AI/shadowgraph#v0.44.3`. The memory-search and onboarding fixes on `main` after that tag are not included in the `v0.44.3` tarball. ShadowGraph is private and unpublished to the npm registry.
 
 ### 2. JSON arguments and your shell
 
@@ -277,7 +277,7 @@ terminal. Give an agent compact mode unless you want it to have the owner tools 
 
 ### AI tool setup
 
-Install globally first so the client can find `shadowgraph` on its `PATH`:
+Install the published `v0.44.3` preview globally first so the client can find `shadowgraph` on its `PATH`. Its tarball does not include the memory-search and onboarding fixes that landed on `main` after that tag:
 
 ```bash
 npm install --global github:LiLara-AI/shadowgraph#v0.44.3
@@ -416,7 +416,7 @@ console.log(graph.review({ project: 'checkout-service' }));
 ```
 
 The bare-specifier import resolves when ShadowGraph is a dependency of your project
-(`npm install github:LiLara-AI/shadowgraph#v0.44.3`). With a `--global` install, use the CLI, HTTP, or MCP
+(`npm install github:LiLara-AI/shadowgraph#v0.44.3`). This installs the published preview; the memory-search and onboarding fixes on `main` after that tag are not in its tarball. With a `--global` install, use the CLI, HTTP, or MCP
 surfaces instead, or import from the installed path.
 
 ## Storage, backup, and deletion

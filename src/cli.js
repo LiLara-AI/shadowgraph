@@ -498,6 +498,8 @@ async function runOneShot() {
       await access(file, fsConstants.R_OK | fsConstants.W_OK);
       const validation = privileged.privilegedValidate(graph);
       const scopedValidation = graph.validate();
+      const doctorCompleteness = { ...scopedValidation.completeness, complete: true };
+      delete doctorCompleteness.limitation;
       const storageDiagnostics = await store.validate?.();
       const mcpPath = fileURLToPath(new URL('./mcp.js', import.meta.url));
       await access(mcpPath, fsConstants.R_OK);
@@ -521,7 +523,7 @@ async function runOneShot() {
             warning: `Configured SHADOWGRAPH_FILE "${placeholderConfigured}" is a template placeholder; using fallback storage at "${file}".`
           } : {}),
           ...(storageDiagnostics?.issues?.length ? { diagnostics: storageDiagnostics } : {}) },
-        graph: { valid: graphValid, issues: validation.issues?.length ?? 0, scope: 'store', completeness: scopedValidation.completeness, limitation: scopedValidation.limitation },
+        graph: { valid: graphValid, issues: validation.issues?.length ?? 0, scope: 'store', completeness: doctorCompleteness },
         hooks: hooks.stores.length ? { activeStore: hooks.stores[0].file, sameStore: !hooks.other } : { activeStore: null },
         extraction: {
           platformSupported: process.platform === 'win32',

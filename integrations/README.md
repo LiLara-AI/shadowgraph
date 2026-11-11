@@ -7,7 +7,7 @@ ShadowGraph is a local decision ledger and unified memory kernel for AI agents. 
 
 ## Install and diagnose
 
-The package remains `private: true` and is not published to the npm registry. Install the GitHub Technical Preview as the [main README](../README.md#1-install) describes, or use its pinned GitHub source tag:
+The package remains `private: true` and is not published to the npm registry. Install the published `v0.44.3` Technical Preview as the [main README](../README.md#1-install) describes, or use its pinned GitHub source tag. The memory-search and onboarding fixes on `main` after that tag are not included in its tarball:
 
 Choose setup options:
 
@@ -20,7 +20,7 @@ shadowgraph doctor
 By default, ShadowGraph uses unified user-home storage (`~/.shadowgraph/data.json`).
 `SHADOWGRAPH_FILE` is an optional override. If shared multi-agent storage or a custom path is desired across multiple agents or tools, set `SHADOWGRAPH_FILE` to a real absolute path (e.g. `C:\shadowgraph\data.json` on Windows or `/shared/shadowgraph/data.json` on POSIX). If `SHADOWGRAPH_FILE` is omitted or contains an unreplaced placeholder, ShadowGraph safely falls back to default user-home storage (`~/.shadowgraph/data.json`).
 
-Use `github:LiLara-AI/shadowgraph#v0.44.3` for the 0.44.3 Technical Preview; without the tag you get `main`. Read the [upgrade and rollback guide](../docs/migration.md) before switching versions.
+Use `github:LiLara-AI/shadowgraph#v0.44.3` for the published 0.44.3 Technical Preview. Its tarball does not include the memory-search and onboarding fixes on `main` after that tag; without the tag you get `main`. Read the [upgrade and rollback guide](../docs/migration.md) before switching versions.
 
 The global install makes the `shadowgraph` binary available to GUI clients that may not launch from a project containing `node_modules/.bin`. If `shadowgraph doctor` is not found, add npm's global bin directory to the environment used by the client and restart it.
 

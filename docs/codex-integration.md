@@ -29,7 +29,7 @@ again during setup. Other CLI versions need a newly validated adapter profile.
 Install the v0.44.3 Technical Preview from its GitHub Release tarball:
 
 ```powershell
-npm install --global https://github.com/LiLara-AI/shadowgraph/releases/download/v0.44.3/shadowgraph-unified-plugin-0.43.1.tgz
+npm install --global https://github.com/LiLara-AI/shadowgraph/releases/download/v0.44.3/shadowgraph-unified-plugin-0.44.3.tgz
 ```
 
 The release includes SHA-256 checksums. The [README quick start](../README.md#quick-start-windows-codex)

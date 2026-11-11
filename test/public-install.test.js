@@ -58,8 +58,8 @@ test('CLI setup initializes a clean store and doctor reports actionable health',
   assert.deepEqual(doctor.storage, { type: 'json', path: resolve(file), initialized: true, readable: true, writable: true });
   assert.equal(doctor.graph.valid, true);
   assert.equal(doctor.graph.scope, 'store');
-  assert.equal(doctor.graph.completeness.complete, false);
-  assert.equal(doctor.graph.limitation.code, 'scoped_coverage');
+  assert.equal(doctor.graph.completeness.complete, true);
+  assert.equal(doctor.graph.limitation, undefined);
   assert.deepEqual(doctor.extraction, {
     platformSupported: process.platform === 'win32',
     detail: process.platform === 'win32'

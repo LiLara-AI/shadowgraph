@@ -51,6 +51,8 @@ test('tool choice explains working context, lookup, expansion, evaluation and ma
   assert.match(desc('retrieve'), /ordered graph neighbours/u);
   assert.match(desc('recall'), /Rank.*lexical.*vector/u);
   assert.match(desc('expand'), /input/u);
+  assert.match(desc('expand'), /expansion fields into this tool's input at top level/u);
+  assert.match(desc('expand'), /recordId, digest and scope/u);
   assert.match(desc('review_context'), /shadowgraph_review.*also persists/u);
   assert.doesNotMatch(desc('review_context'), /evaluates rules only/u);
   assert.match(desc('review'), /persist/i);
