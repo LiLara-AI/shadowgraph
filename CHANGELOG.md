@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.44.4 (2026-11-12)
+
+### Fixed
+
+- Search stored fact keys and values with explicit `fact key` / `fact value` match provenance, and remove the incorrect Arabic synonym that mapped «اتصال» to `local`.
+- Clarify expansion input instructions, review-context persistence, attempt-to-decision linking, and project-scope descriptions while preserving MCP description budgets.
+- Report healthy store-wide doctor checks as complete when no project was requested, without treating unresolved project coverage as a failed store.
+- Improve setup guidance, shell-quoting hints, SQLite experimental-warning handling, loopback-token warning, and dashboard reconsideration visibility.
+- Correct the Codex tarball filename and document which memory-search and onboarding fixes are included in this preview.
+
 ## 0.44.3 (2026-11-10)
 
 *Note: Release versioned as v0.44.3 to prevent collision with prior Glama release 0.44.2 (release id 86431, commit 3758827).*

@@ -226,17 +226,17 @@ test('API reference documents optional resultClass with wording fallback', () =>
   );
 });
 
-test('v0.44.3 release notes and documentation disclose all fixes and release metadata', () => {
+test('v0.44.4 release notes and documentation disclose all fixes and release metadata', () => {
   for (const path of ['CHANGELOG.md', 'RELEASE_NOTES.md']) {
     const document = read(path);
-    const start = document.indexOf('## 0.44.3');
-    assert.notEqual(start, -1, `${path} needs a 0.44.3 entry`);
+    const start = document.indexOf('## 0.44.4');
+    assert.notEqual(start, -1, `${path} needs a 0.44.4 entry`);
     const next = document.indexOf('\n## ', start + 1);
     const entry = document.slice(start, next === -1 ? undefined : next);
-    assert.match(entry, /compact/i);
-    assert.match(entry, /resultClass/);
-    assert.match(entry, /fieldPath/);
-    assert.match(entry, /SHADOWGRAPH_FILE/);
+    assert.match(entry, /fact key/);
+    assert.match(entry, /expansion/);
+    assert.match(entry, /doctor/);
+    assert.match(entry, /onboarding/);
   }
 
   const notes = read('RELEASE_NOTES.md');
@@ -249,16 +249,16 @@ test('v0.44.3 release notes and documentation disclose all fixes and release met
   assert.match(policy, /supersedes/);
 
   const readme = read('README.md');
-  assert.match(readme, /Release-v0\.44\.3-blue/);
-  assert.match(readme, /releases\/tag\/v0\.44\.3/);
-  assert.match(readme, /releases\/download\/v0\.44\.3\/shadowgraph-unified-plugin-0\.44\.3\.tgz/);
-  assert.match(readme, /\*\*Release v0\.44\.3\*\*/);
+  assert.match(readme, /Release-v0\.44\.4-blue/);
+  assert.match(readme, /releases\/tag\/v0\.44\.4/);
+  assert.match(readme, /releases\/download\/v0\.44\.4\/shadowgraph-unified-plugin-0\.44\.4\.tgz/);
+  assert.match(readme, /\*\*Release v0\.44\.4\*\*/);
 
   const manifest = JSON.parse(read('package.json'));
-  assert.equal(manifest.version, '0.44.3');
+  assert.equal(manifest.version, '0.44.4');
 
   const lockfile = JSON.parse(read('package-lock.json'));
-  assert.equal(lockfile.version, '0.44.3');
-  assert.equal(lockfile.packages?.['']?.version, '0.44.3');
+  assert.equal(lockfile.version, '0.44.4');
+  assert.equal(lockfile.packages?.['']?.version, '0.44.4');
 });
 

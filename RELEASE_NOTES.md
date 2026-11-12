@@ -1,5 +1,28 @@
 # ShadowGraph release notes
 
+## 0.44.4 — Memory Search & Onboarding Reliability (2026-11-12)
+
+This patch improves factual retrieval, host guidance, and first-run reliability while preserving the local-first memory model and `private: true`, unpublished-to-npm policy.
+
+### Changes
+
+- Search stored fact keys and values, including values nested in objects and arrays, with explicit `fact key` and `fact value` match provenance. Remove the incorrect «اتصال» → `local` synonym.
+- Make `shadowgraph_expand` copy `recordId`, `digest`, and scope expansion fields into the tool's top-level input. Clarify review persistence and attempt-to-decision linking without exceeding description budgets.
+- Report a healthy store-wide doctor check as `ok: true`, `graph.valid: true`, and `completeness.complete: true` when no project was requested, without a misleading `scoped_coverage` limitation. Other scoped reads retain their existing behavior.
+- Improve setup and CLI guidance, shell-quoting diagnostics, SQLite experimental-warning output, loopback token warning, and dashboard reconsideration visibility.
+- Correct the Codex install asset to `shadowgraph-unified-plugin-0.44.4.tgz` and document the memory-search and onboarding fixes included in this preview.
+
+Version `0.44.4` is synchronized across `package.json`, `package-lock.json`, `README.md`, `CHANGELOG.md`, `RELEASE_NOTES.md`, and current install documentation. Earlier tags and assets remain available. Glama display labels and MCP runtime versions are independent; verify the actual build checkout, tree, runtime, and advertised tools.
+
+### Verification
+
+- Full product suite: 5,959 tests; 5,880 passed, 79 declared skips, 0 failures.
+- Focused doctor, expansion, install, and description-budget tests: 114 passed, 0 failures.
+- `npm run check`, `npm run check:mcp`, `npm run check:integrations`, `npm run check:package`, and `npm run smoke:package` pass.
+- GitHub CI: all 12 Ubuntu/Windows jobs on Node 20/22/24 passed for the incorporated changes.
+
+No telemetry, non-loopback HTTP binding, mandatory API token, or live model-selection experiment is added. Glama publication is verified separately from GitHub publication.
+
 ## 0.44.3 — Compact Lifecycle, Actionable Errors & Safe Integration Configurations (2026-11-10)
 
 This release delivers the complete decision lifecycle in the compact MCP profile, actionable caller-facing tool validation errors with explicit field paths and enum hints, enhanced attempt parameter usability, and safe integration configuration fallbacks across client templates.

@@ -5,9 +5,9 @@
 ShadowGraph records what worked, what failed, and why a decision was made—then supplies relevant experience when you continue working. The demonstrated automatic paths are the **Windows Codex terminal wrapper** and, in print mode, **Claude Code CLI hooks on Windows**, after one-time setup in projects you enroll.
 
 [![CI](https://github.com/LiLara-AI/shadowgraph/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/LiLara-AI/shadowgraph/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/badge/Release-v0.44.3-blue)](https://github.com/LiLara-AI/shadowgraph/releases/tag/v0.44.3)
+[![Release](https://img.shields.io/badge/Release-v0.44.4-blue)](https://github.com/LiLara-AI/shadowgraph/releases/tag/v0.44.4)
 
-[Get started](#quick-start-windows-codex) · [Supported workflows](#supported-workflows) · [Release & downloads](https://github.com/LiLara-AI/shadowgraph/releases/tag/v0.44.3) · [Documentation](#documentation)
+[Get started](#quick-start-windows-codex) · [Supported workflows](#supported-workflows) · [Release & downloads](https://github.com/LiLara-AI/shadowgraph/releases/tag/v0.44.4) · [Documentation](#documentation)
 
 ![Session A works and repairs a failure; capture feeds background extraction through the selected provider; local memory supplies relevant experience to fresh Session B. Foreground work continues and cross-project reuse requires explicit sharing.](https://raw.githubusercontent.com/LiLara-AI/shadowgraph/v0.43.1/docs/assets/workflow.svg)
 
@@ -33,10 +33,10 @@ The Codex executor is a separate prerequisite distributed as `@openai/codex`. Sh
 
 ### 1. Install
 
-Run in PowerShell 7+. The version is pinned; the [release](https://github.com/LiLara-AI/shadowgraph/releases/tag/v0.44.3) includes `SHA256SUMS.txt` for the tarball.
+Run in PowerShell 7+. The version is pinned; the [release](https://github.com/LiLara-AI/shadowgraph/releases/tag/v0.44.4) includes `SHA256SUMS.txt` for the tarball.
 
 ```powershell
-npm install --global https://github.com/LiLara-AI/shadowgraph/releases/download/v0.44.3/shadowgraph-unified-plugin-0.44.3.tgz
+npm install --global https://github.com/LiLara-AI/shadowgraph/releases/download/v0.44.4/shadowgraph-unified-plugin-0.44.4.tgz
 
 $executorDir = Join-Path $env:LOCALAPPDATA 'ShadowGraph-Codex-0.161.0'
 npm install --prefix $executorDir @openai/codex@0.161.0
@@ -326,7 +326,7 @@ Each host turn has a 120-second process limit. Background extraction has bounded
 
 For Claude Code CLI, delivered experience is not always applied: in one live run a fresh session received an earlier lesson and did not apply it. After extraction is deactivated and activated again, items left pending under the earlier setup are not extracted; status reports them as `priorSetup`. The Claude Code evidence is one Windows print-mode (`claude -p`) path, not every host.
 
-This is **Release v0.44.3**, not stable/GA. There are no claims of perfect semantic classification, universal language support, cost or time savings, superiority over native memory, or a human third-party security audit. See [release notes](RELEASE_NOTES.md), [security scope](SECURITY.md) and [benchmark status](docs/benchmark-report.md).
+This is **Release v0.44.4**, not stable/GA. There are no claims of perfect semantic classification, universal language support, cost or time savings, superiority over native memory, or a human third-party security audit. See [release notes](RELEASE_NOTES.md), [security scope](SECURITY.md) and [benchmark status](docs/benchmark-report.md).
 
 ## Upgrade and storage
 
