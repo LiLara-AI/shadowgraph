@@ -1,6 +1,6 @@
 {
   "name": "shadowgraph-unified-plugin",
-  "version": "0.44.3",
+  "version": "0.44.4",
   "private": true,
   "description": "Local-first decision and scoped temporal memory for AI agents",
   "type": "module",
