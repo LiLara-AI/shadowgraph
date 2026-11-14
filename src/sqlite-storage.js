@@ -167,7 +167,15 @@ export async function createSqliteStore(filePath, options = {}) {
       || keyedExtraCollections.some(([collection, key]) => {
         const nextKeys = new Set(entriesOf(next, collection).map((item) => item?.[key]));
         return entriesOf(current, collection).some((item) => !nextKeys.has(item?.[key]));
-      });
+      })
+      || expiresExtractionOutput(current, next);
+  }
+
+  // Expiry blanks unsupported extraction output inside rows that keep their id
+  // (shadowgraph.js expireCapture); that save must scrub the old bytes too.
+  function expiresExtractionOutput(current, next) {
+    const live = new Set(entriesOf(current, 'records').filter((item) => item?.extractionOutput?.unsupported?.length).map((item) => item.id));
+    return live.size > 0 && entriesOf(next, 'records').some((item) => item?.extractionOutput?.expired === true && live.has(item.id));
   }
 
   function persistedPayload(data) {

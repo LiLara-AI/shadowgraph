@@ -22,6 +22,7 @@ import { outcomeFromExitStatus } from './internal/outcome.js';
 import { currentAccessOperation } from './internal/access-transport.js';
 import { stripDeliveredBlocks } from './internal/capture-source.js';
 import { sameExtractionBinding } from './internal/extraction-provenance.js';
+import { redactText } from './internal/redaction.js';
 
 const runtimeRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const configFile = home => join(home, 'codex-integration.json');
@@ -355,7 +356,8 @@ export async function runCodexSession({ home, cwd = process.cwd(), prompts, maxC
         const request = codexHostRequest({ config, cwd: work, prompt, context: delivery.text, history, env });
         const host = await (runHost ?? (request => runSupervised(request, { env: hostControlEnv, activationId: initial.setupId })))({ ...request, signal: controller.signal });
         hostUncertain ||= host.localChildStopped !== true;
-        await writeJsonAtomically(join(runDirectory, `turn-${turn}-host.json`), host);
+        // Raw host output can carry command output with secrets: keep only its redacted form.
+        await writeJsonAtomically(join(runDirectory, `turn-${turn}-host.json`), { ...host, stdout: redactText(host.stdout ?? ''), stderr: redactText(host.stderr ?? '') });
         if (host.failure || host.code !== 0 || hostUncertain || !await guard()) fail('codex_host_failed_or_unsettled');
         if (/rejected: blocked by policy|Rejected\([^\r\n]*blocked by policy/u.test(host.stderr ?? '')) fail('codex_host_policy_rejected');
         const events = host.stdout.trim().split(/\r?\n/u).filter(Boolean).map(JSON.parse);

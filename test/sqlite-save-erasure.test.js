@@ -202,6 +202,30 @@ test('append-only SQLite saves do not pay the destructive VACUUM path', async (t
   assert.equal(statements.some((sql) => /\bVACUUM\b/i.test(sql)), false, 'append-only saves must skip compaction');
 });
 
+test('a save that expires unsupported extraction output in place scrubs its old bytes', async (t) => {
+  try { await import('node:sqlite'); }
+  catch { return t.skip(NODE_SQLITE_NOT_APPLICABLE_REASON); }
+  const directory = await scratchDirectory(t, 'shadowgraph sqlite output expiry ');
+  const file = join(directory, 'expiry live.db');
+  // A short marker: the whole text spans overflow pages, so it is never contiguous.
+  const marker = `SQLITE-EXPIRED-UNSUPPORTED-${randomUUID()}`;
+  const sentinel = `${marker}-${'secret'.repeat(1000)}`;
+  const base = { schemaVersion: 7, facts: [], relations: [], reviewSignals: [], idempotency: [], events: [], journal: [], journalSeq: 0, journalEpoch: null };
+  const records = (extractionOutput) => [
+    { id: 'capture-1', kind: 'memory', project: 'p', text: 'kept', extractionOutput },
+    { id: 'capture-2', kind: 'memory', project: 'p', text: 'z'.repeat(3000) }
+  ];
+  const store = await createSqliteStore(file);
+  const expiresAt = '2026-01-01T00:00:00.000Z';
+  const first = await store.save({ ...base, revision: 0, records: records({ unsupported: [sentinel], expiresAt }) });
+  const paths = [file, ...SQLITE_SIDECAR_SUFFIXES.map((suffix) => `${file}${suffix}`)];
+  const holding = async () => (await Promise.all(paths.map(readIfPresent))).filter((bytes) => bytes?.includes(Buffer.from(marker))).length;
+  assert.ok(await holding() > 0, 'precondition: unsupported text reached SQLite bytes');
+  await store.save({ ...base, revision: first, records: records({ unsupported: [], expiresAt, expired: true }) });
+  store.close();
+  assert.equal(await holding(), 0, 'no SQLite file may retain expired unsupported text');
+});
+
 test('destructive save serializes across idle stores and rejects the stale writer', async (t) => {
   let DatabaseSync;
   try { ({ DatabaseSync } = await import('node:sqlite')); }

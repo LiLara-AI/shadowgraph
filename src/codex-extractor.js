@@ -142,7 +142,7 @@ export function createCodexExtractor({ executable, env = process.env, scratchRoo
   async function scratch(operation) {
     const root = await realpath(scratchRoot), cwd = await mkdtemp(join(root, 'shadowgraph-codex-extract-'));
     try { return await operation(cwd); }
-    finally { const path = await realpath(cwd).catch(() => null); if (path && dirname(path) === root && basename(path).startsWith('shadowgraph-codex-extract-')) await rm(path, { recursive: true, force: true }); }
+    finally { const path = await realpath(cwd).catch(() => null); if (path && dirname(path) === root && basename(path).startsWith('shadowgraph-codex-extract-')) await rm(path, { recursive: true, force: true, maxRetries: 3 }).catch(() => {}); } // a cleanup failure never replaces the result
   }
   return {
     get localChildStopped() { return !unsettled; },

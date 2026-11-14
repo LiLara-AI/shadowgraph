@@ -1012,3 +1012,10 @@ test('the redactor delivery shares with capture removes cookie pairs, key data a
   assert.equal(redactText('client-key-data: QUJDREVGR0g='), '[REDACTED]');
   assert.equal(redactText('http --auth me:abc123 https://x'), 'http --auth [REDACTED] https://x');
 });
+
+test('a long run of cookie: headers redacts in linear time, so hostile content cannot stall its own capture', () => {
+  const started = performance.now();
+  assert.equal(redactText('cookie:'.repeat(30_000)), 'cookie:'.repeat(30_000));
+  assert.ok(performance.now() - started < 1000, 'cookie redaction must not be quadratic');
+  assert.equal(redactText('"set-cookie": "sid=xyz; Path=/"'), '"set-cookie": [REDACTED]');
+});
