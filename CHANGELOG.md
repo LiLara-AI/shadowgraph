@@ -8,6 +8,8 @@
 - Scrub the old bytes on SQLite when expiry blanks unsupported extraction output in place, as the API reference promises.
 - Keep only redacted host output in the Codex wrapper's private `turn-N-host.json` files.
 - A scratch-folder cleanup failure (for example a Windows scanner lock) is retried and no longer replaces a finished extraction result.
+- A destructive SQLite save no longer reports `sqlite_save_compaction_unconfirmed` after committing when an imported journal was out of SQLite's read order.
+- A capture spool entry whose failed attempt cannot be recorded is dropped with an `attempt_unrecorded` marker instead of holding the whole queue until it expires.
 - List the binding and access commands in `shadowgraph --help`; correct stale version headers, the CLI-versus-MCP default store guidance, and notes that called v0.44.4 incomplete.
 - Update the MCP gate test tooling to hono 4.13.18 and @hono/node-server 2.1.8 (seven Dependabot alerts).
 

@@ -202,6 +202,23 @@ test('append-only SQLite saves do not pay the destructive VACUUM path', async (t
   assert.equal(statements.some((sql) => /\bVACUUM\b/i.test(sql)), false, 'append-only saves must skip compaction');
 });
 
+test('a destructive save confirms its commit when the journal arrived out of SQLite read order', async (t) => {
+  try { await import('node:sqlite'); }
+  catch { return t.skip(NODE_SQLITE_NOT_APPLICABLE_REASON); }
+  const directory = await scratchDirectory(t, 'shadowgraph sqlite journal order ');
+  const graph = createShadowGraph({ now: () => '2026-08-28T00:00:00.000Z' });
+  graph.addDecision({ project: 'removed', title: 'Removed', chosen: 'gone' });
+  graph.addDecision({ project: 'kept', title: 'Kept', chosen: 'stays' });
+  const snapshot = privilegedSnapshot(graph);
+  // A numbered journal followed by an unnumbered legacy entry: SQLite reads it back first.
+  snapshot.journal.push({ id: 'legacy_1', type: 'legacy_metadata_event', replayable: false, payload: null });
+  const store = await createSqliteStore(join(directory, 'journal order.db'));
+  t.after(() => store.close());
+  const first = await store.save(snapshot);
+  const removed = { ...snapshot, records: snapshot.records.filter((item) => item.project !== 'removed'), expectedRevision: first };
+  assert.equal(await store.save(removed), first + 1);
+});
+
 test('a save that expires unsupported extraction output in place scrubs its old bytes', async (t) => {
   try { await import('node:sqlite'); }
   catch { return t.skip(NODE_SQLITE_NOT_APPLICABLE_REASON); }
