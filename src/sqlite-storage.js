@@ -167,9 +167,18 @@ export async function createSqliteStore(filePath, options = {}) {
       || keyedExtraCollections.some(([collection, key]) => {
         const nextKeys = new Set(entriesOf(next, collection).map((item) => item?.[key]));
         return entriesOf(current, collection).some((item) => !nextKeys.has(item?.[key]));
-      });
+      })
+      || expiresExtractionOutput(current, next);
   }
 
+  // Expiry blanks unsupported extraction output inside rows that keep their id
+  // (shadowgraph.js expireCapture); that save must scrub the old bytes too.
+  function expiresExtractionOutput(current, next) {
+    const live = new Set(entriesOf(current, 'records').filter((item) => item?.extractionOutput?.unsupported?.length).map((item) => item.id));
+    return live.size > 0 && entriesOf(next, 'records').some((item) => item?.extractionOutput?.expired === true && live.has(item.id));
+  }
+
+  const journalOrder = (item) => (Number.isInteger(item?.seq) ? item.seq : Number.MIN_SAFE_INTEGER);
   function persistedPayload(data) {
     const result = {
       schemaVersion: Number(data.schemaVersion ?? SCHEMA_VERSION),
@@ -180,7 +189,9 @@ export async function createSqliteStore(filePath, options = {}) {
       reviewSignals: data.reviewSignals ?? [],
       idempotency: data.idempotency ?? [],
       events: data.events ?? [],
-      journal: data.journal ?? [],
+      // The order SQLite reads it back in (ORDER BY seq, rowid; a missing seq is
+      // NULL and sorts first), so an imported out-of-order journal still matches.
+      journal: [...(data.journal ?? [])].sort((a, b) => journalOrder(a) - journalOrder(b)),
       journalSeq: Number(data.journalSeq ?? 0),
       journalEpoch: data.journalEpoch === null || data.journalEpoch === undefined ? null : Number(data.journalEpoch)
     };

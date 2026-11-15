@@ -7,17 +7,18 @@ ShadowGraph is a local decision ledger and unified memory kernel for AI agents. 
 
 ## Install and diagnose
 
-The package remains `private: true` and is not published to the npm registry. Install the published `v0.44.4` Technical Preview as the [main README](../README.md#1-install) describes, or use its pinned GitHub source tag. The memory-search and onboarding fixes on `main` after that tag are not included in its tarball:
+The package remains `private: true` and is not published to the npm registry. Install the published `v0.44.4` Technical Preview as the [main README](../README.md#1-install) describes, or use its pinned GitHub source tag.
 
 Choose setup options:
 
 ```bash
 npm install --global github:LiLara-AI/shadowgraph#v0.44.4
+cd ~
 shadowgraph setup
 shadowgraph doctor
 ```
 
-By default, ShadowGraph uses unified user-home storage (`~/.shadowgraph/data.json`).
+The MCP server uses unified user-home storage (`~/.shadowgraph/data.json`) unless it is launched in a directory that already holds `.shadowgraph/data.json`. CLI commands, including `setup` and `doctor`, use `.shadowgraph/data.json` in the current directory, so run them from your home directory (`cd ~`) to set up and check the same store the MCP server uses.
 `SHADOWGRAPH_FILE` is an optional override. If shared multi-agent storage or a custom path is desired across multiple agents or tools, set `SHADOWGRAPH_FILE` to a real absolute path (e.g. `C:\shadowgraph\data.json` on Windows or `/shared/shadowgraph/data.json` on POSIX). If `SHADOWGRAPH_FILE` is omitted or contains an unreplaced placeholder, ShadowGraph safely falls back to default user-home storage (`~/.shadowgraph/data.json`).
 
 Use `github:LiLara-AI/shadowgraph#v0.44.4` for the published 0.44.4 Technical Preview, including the memory-search and onboarding fixes through this release. Without the tag you get `main`. Read the [upgrade and rollback guide](../docs/migration.md) before switching versions.

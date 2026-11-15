@@ -85,7 +85,7 @@ process limit. One host and one extraction invocation can run concurrently;
 extraction remains serial, with four items/calls and 240 seconds per drain,
 twelve reserved calls per rolling hour, and the existing bounded retry policy.
 These background ceilings do not terminate otherwise-permitted foreground work.
-Reservations, outcomes and timings are private under `runs`; unknown usage is not zero.
+Reservations, outcomes, timings and redacted host output are private under `runs`; unknown usage is not zero.
 
 Memory delay or failure reports pending/degraded state when that state changes.
 It does not withhold a completed answer or prevent another task. The private

@@ -353,7 +353,9 @@ export function createExtractor({ executable, env = process.env, scratchRoot = t
       // Validate the absolute cleanup target and its parent. Never recursively
       // remove a caller-selected path or a replaced junction outside this root.
       const actual = await realpath(cwd).catch(() => null);
-      if (actual && dirname(actual) === root && basename(actual).startsWith('shadowgraph-extract-') && !relative(root, actual).startsWith('..')) await rm(actual, { recursive: true, force: true });
+      // A briefly locked folder (Windows scanner or indexer) is retried; a
+      // cleanup failure never replaces the operation's own result or error.
+      if (actual && dirname(actual) === root && basename(actual).startsWith('shadowgraph-extract-') && !relative(root, actual).startsWith('..')) await rm(actual, { recursive: true, force: true, maxRetries: 3 }).catch(() => {});
     }
   }
   return {

@@ -103,7 +103,10 @@ export async function failSpoolEntry(spool, entry, reason) {
   if (attempts >= SPOOL_LIMITS.maxAttempts) return dropSpoolEntry(spool, entry, 'attempts_exhausted', reason);
   const next = { ...entry, attempts };
   next.name = nameOf(next);
-  await rename(join(spool, entry.name), join(spool, next.name)).catch(() => {});
+  // An attempt that cannot be recorded would hold the queue until expiry, with
+  // every entry behind it: drop this one with a marker instead. Gone is fine.
+  try { await rename(join(spool, entry.name), join(spool, next.name)); }
+  catch (error) { if (error?.code !== 'ENOENT') return dropSpoolEntry(spool, entry, 'attempt_unrecorded', reason); }
   return next;
 }
 

@@ -277,10 +277,11 @@ terminal. Give an agent compact mode unless you want it to have the owner tools 
 
 ### AI tool setup
 
-Install the published `v0.44.4` preview globally first so the client can find `shadowgraph` on its `PATH`. Its tarball does not include the memory-search and onboarding fixes that landed on `main` after that tag:
+Install the published `v0.44.4` preview globally first so the client can find `shadowgraph` on its `PATH`. Run `setup` from your home directory so it creates the same `~/.shadowgraph/data.json` the MCP server uses:
 
 ```bash
 npm install --global github:LiLara-AI/shadowgraph#v0.44.4
+cd ~
 shadowgraph setup
 shadowgraph doctor
 ```
@@ -416,7 +417,7 @@ console.log(graph.review({ project: 'checkout-service' }));
 ```
 
 The bare-specifier import resolves when ShadowGraph is a dependency of your project
-(`npm install github:LiLara-AI/shadowgraph#v0.44.4`). This installs the published preview; the memory-search and onboarding fixes on `main` after that tag are not in its tarball. With a `--global` install, use the CLI, HTTP, or MCP
+(`npm install github:LiLara-AI/shadowgraph#v0.44.4`). With a `--global` install, use the CLI, HTTP, or MCP
 surfaces instead, or import from the installed path.
 
 ## Storage, backup, and deletion

@@ -165,8 +165,9 @@ function redactNamedValues(text) {
 
 // A cookie header, also as a quoted JSON key, whose value holds a name=value
 // pair: session credentials, removed to the line's end. Prose about a cookie
-// is left alone.
-const COOKIE_HEADER = /(\b(?:set-)?cookie["']?[^\S\r\n]*:)(?=[^\S\r\n]*["']?[^\s=;"']+=)[^\r\n]*/giu;
+// is left alone. A cookie name never holds ':' (RFC 6265); excluding it keeps
+// a run of `cookie:cookie:...` linear instead of quadratic.
+const COOKIE_HEADER = /(\b(?:set-)?cookie["']?[^\S\r\n]*:)(?=[^\S\r\n]*["']?[^\s=;"':]+=)[^\r\n]*/giu;
 function redactView(text) {
   let result = text.replace(KEY_BLOCK, REDACTED);
   for (const pattern of KNOWN_TOKENS) result = result.replace(pattern, REDACTED);

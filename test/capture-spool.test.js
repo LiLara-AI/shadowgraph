@@ -244,6 +244,20 @@ test('an entry that keeps failing is dropped with a marker after its attempts, a
   assert.deepEqual(reasons.sort(), ['attempts_exhausted:synthetic', 'expired']);
 });
 
+test('an entry whose attempt cannot be recorded is dropped with a marker instead of holding the queue', async (t) => {
+  const s = await setup(t);
+  const { entry } = await spoolEvent({ spool: s.spool, input: prompt('stuck', { message_id: 'stuck' }), cwd: s.cwd });
+  // A non-empty directory at the next attempt's name makes the rename fail.
+  const blocker = join(s.spool, `${String(entry.at).padStart(15, '0')}-${entry.key}-${entry.attempts + 1}.json`);
+  await mkdir(blocker);
+  await writeFile(join(blocker, 'occupied'), 'x');
+  assert.equal(await failSpoolEntry(s.spool, entry, 'synthetic'), null);
+  await fs.promises.rm(blocker, { recursive: true });
+  assert.equal((await spoolEntries(s.spool)).length, 0);
+  const reasons = await Promise.all((await readdir(droppedDirectory(s.spool))).map(async (name) => JSON.parse(await readFile(join(droppedDirectory(s.spool), name), 'utf8')).reason));
+  assert.deepEqual(reasons, ['attempt_unrecorded:synthetic']);
+});
+
 // Audit 2026-10-29: a store failure that is not contention counted an attempt
 // on every drain pass, so one hook spent four of an entry's eight.
 test('a store failure costs a waiting entry one attempt per hook, not one per drain pass', { timeout: 60_000 }, async (t) => {
