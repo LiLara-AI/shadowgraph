@@ -5873,7 +5873,7 @@ export function createShadowGraph(options = {}) {
     const fired = factual
       ? { ...openReviews, items: openReviews.items.map((entry) => Object.fromEntries(Object.entries(entry).map(([key, value]) => [key === 'alternativesToReconsider' ? 'affectedAlternatives' : key, value]))) }
       : openReviews;
-    const isForeignSelectable = (x) => !withheldToken(x.erasureToken) && !isLegacyOwned(x) && !isStoredWithoutProject(x) && x.project !== null && x.project !== project && x.visibility !== 'project';
+    const isForeignSelectable = (x) => input.includeCrossProject !== false && !withheldToken(x.erasureToken) && !isLegacyOwned(x) && !isStoredWithoutProject(x) && x.project !== null && x.project !== project && x.visibility !== 'project';
     const userMemories = collect(
       project == null ? [] : [...records.values()]
         .filter((x) => x.kind === 'memory' && x.status === 'active' && (inScope(x) || (isForeignSelectable(x) && (x.visibility === 'global' || ['preference', 'instruction', 'profile', 'procedure'].includes(x.memoryType)))))
@@ -5981,7 +5981,7 @@ export function createShadowGraph(options = {}) {
         })
     );
     const relevantToTask = taskQuery
-      ? recall(taskQuery, { project, includeCrossProject: true, expandSynonyms: true, limit: Math.min(limit ?? 10, 10), preferRecent: true }).items.map((item) => ({
+      ? recall(taskQuery, { project, includeCrossProject: input.includeCrossProject !== false, expandSynonyms: true, limit: Math.min(limit ?? 10, 10), preferRecent: true }).items.map((item) => ({
           id: item.record.id,
           kind: item.record.kind,
           sourceProject: item.record.project ?? project,
@@ -6124,9 +6124,14 @@ export function createShadowGraph(options = {}) {
     const hits = ranked.items.filter(({ record, ranks }) => (ranks.lexical !== null && content.matched.has(record.id)) || ranks.semantic !== null || ranks.graph !== null);
     const signals = { ...ranked.signals, lexical: { available: content.terms.length > 0, matched: content.matched.size } };
     const established = hits.length > 0;
-    const candidates = established ? hits : [...new Map(workingSet.map((record) => [record.id, { record, score: null, ranks: null }])).values()];
-    const page = resolvePage({ limit: input.limit, offset: 0 }, candidates.length);
     const lineContext = { asOf, scope: lineScope(boundary), derivedAt: now(), visible: scopedReach(boundary, memoryScope) };
+    const corrections = correctionsWithin(lineContext.visible);
+    // The working set names the records that correct it (a memory kept
+    // verbatim is not in it otherwise), so each is delivered right after the
+    // record it corrects, within the reach every other record has.
+    const fallback = workingSet.flatMap((record) => [record, ...(corrections(record.id).correctedBy ?? []).map((id) => records.get(id))]);
+    const candidates = established ? hits : [...new Map(fallback.map((record) => [record.id, { record, score: null, ranks: null }])).values()];
+    const page = resolvePage({ limit: input.limit, offset: 0 }, candidates.length);
     // §17.5 (PR-29): each delivered record's temporal evidence at the read's
     // instant, from the supersession links, named on either side, that the read
     // may reach. Links are gathered for the delivered records only.
@@ -6157,7 +6162,6 @@ export function createShadowGraph(options = {}) {
       successors: linksOf('successors', record.id), predecessors: linksOf('predecessors', record.id),
       at: asOf ?? currentAt, asOf
     });
-    const corrections = correctionsWithin(reach);
     let shortened = false;
     const items = candidates.slice(0, page.limit).map(({ record, score, ranks }) => {
       const shown = canonicalRecord(record);

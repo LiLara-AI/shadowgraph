@@ -123,7 +123,9 @@ test('G5-2: the failure reason keeps its state; legacy free text is never shown 
   assert.match(reasoned.line, /; no result class;/);
   assert.equal(lineOf(legacy, 'legacy-silent').outcome.reasonState, 'not_recorded');
   assert.match(lineOf(legacy, 'legacy-silent').line, /reason not recorded/);
-  assert.match(t1Line({ ...shown(graph, attempt.id), causalClaim: { state: 'unknown' } }, CONTEXT).line, /; reason unknown/);
+  // Only the extractor records a cause as unknown; a reason it kept is its own, unverified.
+  assert.match(t1Line({ ...shown(graph, attempt.id), causalClaim: { state: 'unknown' } }, CONTEXT).line, /; reason "the quota is per tenant" \(model-proposed, not verified\)/);
+  assert.match(t1Line({ ...shown(graph, attempt.id), reason: '', causalClaim: { state: 'unknown' } }, CONTEXT).line, /; reason unknown/);
   assert.match(t1Line({ ...shown(graph, attempt.id), causalClaim: { state: 'mystery' } }, CONTEXT).line, /; reason "the quota is per tenant" \(cause state "mystery"\)/);
   const { causalClaim, ...bare } = shown(graph, attempt.id);
   assert.equal(t1Line(bare, CONTEXT).outcome.reasonState, 'legacy_freetext', 'as a public read derives it');

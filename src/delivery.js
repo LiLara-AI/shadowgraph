@@ -12,6 +12,7 @@ import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { readExtractionAvailability } from './internal/extraction-availability.js';
+import { RAW_RETENTION_DAYS } from './internal/capture-retention.js';
 import { extractionSupersession } from './internal/extraction-supersession.js';
 import { activeCapture, storeRepository } from './capture-hook.js';
 import { spoolDirectory, spoolStatus } from './internal/capture-spool.js';
@@ -282,18 +283,23 @@ const SESSION_LINE_CEILING = 2048;
 // A line is rendered again from the redacted record, so its text never holds
 // what redaction removed; its handle stays the read's own, bound to the record
 // as stored, so expansion finds the very revision.
-function itemOf({ tier, line, record, expansion, temporalEvidence, correctedBy }, records, longer = false) {
-  // A memory a correction names without closing it says so beside its state.
+const CORRECTED = 'A later message corrects this record (correctedBy); nothing was closed automatically, and the correction is a model interpretation, not verified.';
+function itemOf({ tier, line, record, expansion, temporalEvidence, correctedBy }, records, longer = false, room = Infinity) {
+  // A record a correction names without closing it says so beside its state.
   const time = { eventTime: temporalEvidence?.eventTime?.state ?? null, currentState: temporalEvidence?.currentState ? { state: temporalEvidence.currentState.state, basis: temporalEvidence.currentState.basis } : null,
-    ...(correctedBy ? { correctedBy } : {}) };
+    ...(correctedBy ? { correctedBy, corrected: CORRECTED } : {}) };
   if (tier !== 'T1' && longer && expansion) {
     // The read's record holds only the links its scope shows, so the line is
     // derived from it under the read's instant and scope, and kept only where
     // it names the very revision the read's handle does.
     const context = { asOf: expansion.asOf, scope: expansion.scope, derivedAt: expansion.derivedAt, ceiling: SESSION_LINE_CEILING, visible: () => true };
     const bound = t1Line(record, context), rendered = t1Line(redactValue(record), context);
-    if (bound.expansion.digest === expansion.digest && !bound.decisiveOmitted.length && !rendered.decisiveOmitted.length) {
-      return { tier: 'T1', line: rendered.line, claimClass: bound.claimClass, requiresExpansion: bound.requiresExpansion, ...time, expansion };
+    const whole = !bound.decisiveOmitted.length && !rendered.decisiveOmitted.length;
+    // A full record the payload can never hold is delivered as this line too,
+    // declaring what it leaves out, rather than not at all.
+    if (bound.expansion.digest === expansion.digest && (whole || bytes(`item: ${show(redactValue({ tier, record, ...time }))}`) >= room)) {
+      const omitted = rendered.decisiveOmitted;
+      return { tier: 'T1', line: rendered.line, claimClass: bound.claimClass, requiresExpansion: bound.requiresExpansion || !whole, ...(omitted.length ? { omitted } : {}), ...time, expansion };
     }
   }
   if (tier !== 'T1') return { tier, record, ...time };
@@ -327,8 +333,41 @@ function sessionOrder(items) {
   return ordered;
 }
 
+// At the session start a line that corrects a delivered record follows it
+// directly, so the two are read together. A correction delivered as a full
+// record keeps its place behind the lines (C3r above). Each item is taken
+// once, so records that name each other are still all delivered.
+const idOf = (item) => item.expansion?.recordId ?? item.record?.id;
+function correctionsAfter(items) {
+  const byId = new Map(items.map((item) => [idOf(item), item]));
+  const moved = new Set(items.flatMap((item) => (item.correctedBy ?? []).filter((id) => byId.get(id)?.tier === 'T1')));
+  const ordered = new Set();
+  const take = (item) => {
+    if (ordered.has(item)) return;
+    ordered.add(item);
+    for (const id of item.correctedBy ?? []) if (moved.has(id)) take(byId.get(id));
+  };
+  for (const item of items) if (!moved.has(idOf(item))) take(item);
+  for (const item of items) take(item);
+  return [...ordered];
+}
+
 const PROJECT_UNRESOLVED = { code: 'project_unresolved', detail: 'No project was resolved for this workspace, so no project memory was searched.' };
-const NOT_ASSESSED = { code: 'relevance_not_assessed', detail: `No prompt has been given yet, so relevance was not assessed: the working set follows, newest first and mixed by kind among its first ${MAX_PAGE_LIMIT} records (current decisions, failed and reusable attempts, then stale facts), as far as the payload cap allows. The semantic signal is unavailable on this path.` };
+// A session start with no record says why, where the capture status shows it,
+// and what changes it; otherwise its own limitation stands. Extraction is
+// named only for a project that has captured items: a store with nothing
+// captured, or holding only what a session start never carries, has another reason.
+function emptyReason(capturing, extracting, status) {
+  const held = ['pending', 'processing', 'failed', 'blocked', 'expired', 'priorSetup'].reduce((sum, name) => sum + (status?.[name] ?? 0), 0);
+  if (capturing && !extracting && held) {
+    const expired = status?.expired ? ` (${status.expired} captured item${status.expired === 1 ? ' has' : 's have'} already expired unread)` : '';
+    return { code: 'extraction_not_active', detail: `No memory is delivered because capture is on but extraction is not: captured work is never turned into records${expired}, and its raw text expires after the retention period (${RAW_RETENTION_DAYS} days by default); turn extraction on with \`shadowgraph activate extraction\` (docs/claude-code-integration.md).` };
+  }
+  const waiting = (status?.pending ?? 0) + (status?.processing ?? 0);
+  if (extracting && waiting) return { code: 'extraction_pending', detail: `No memory is delivered yet because ${waiting} captured item${waiting === 1 ? ' of this project is' : 's of this project are'} not yet processed by extraction; the worker runs after each session's Stop, and \`shadowgraph extract --status\` shows the queue.` };
+  return null;
+}
+const NOT_ASSESSED = { code: 'relevance_not_assessed', detail: `No prompt has been given yet, so relevance was not assessed: the working set follows, newest first and mixed by kind among its first ${MAX_PAGE_LIMIT} records (current decisions, failed and reusable attempts, then stale facts, and a correction after the record it corrects), as far as the payload cap allows. The semantic signal is unavailable on this path.` };
 
 // SessionStart delivers the working set, the read's declared fallback when no
 // signal can establish relevance (G-5 §9), and says what state memory is in:
@@ -411,7 +450,7 @@ export async function runDeliver({ args = [], readInput = () => '', file, storag
     const records = new Map([...canonical].map(([id, record]) => [id, extractionSupersession(record, canonical, exported.relations)]));
     const head = {
       trigger, store: 'available', scope: relevant.scope, complete: relevant.complete,
-      limitation: unresolved ? PROJECT_UNRESOLVED : session ? NOT_ASSESSED : relevant.limitation ?? null,
+      limitation: unresolved ? PROJECT_UNRESOLVED : session ? (relevant.total === 0 && !relevant.quarantined && emptyReason(capturing && !refusal, extractionAvailability.active, relevant.capture)) || NOT_ASSESSED : relevant.limitation ?? null,
       // What deletion records withhold from this scope as possibly purged,
       // counted as every read counts it (PR-37c design §9.3): the session
       // start's own limitation leaves the read's detail out, never the count.
@@ -423,12 +462,6 @@ export async function runDeliver({ args = [], readInput = () => '', file, storag
       // version is said to be unverified (§18.1, F-23).
       ...(pinned?.host ? { host: pinned.host } : {})
     };
-    // The working set is ordered on the records, then each becomes its line.
-    const derived = (session ? sessionOrder(relevant.items) : relevant.items).map((item) => itemOf(item, records, true)).filter(Boolean);
-    // Lines first, then full records, each in the read's order: a full record
-    // of several kilobytes ranked first left no room for the relevant lines
-    // behind it (live proof run 2, case C3r).
-    const items = [...derived.filter((item) => item.tier === 'T1'), ...derived.filter((item) => item.tier !== 'T1')];
     // The status in brief, bounded whatever the store holds: counts, and the
     // names of the limits and gaps the reads declare.
     const status = relevant.capture;
@@ -442,7 +475,16 @@ export async function runDeliver({ args = [], readInput = () => '', file, storag
       ...(!status && spoolGaps.length ? { gaps: spoolGaps } : {}),
       ...(spool && (spool.pending || spool.dropped) ? { inputWaiting: spool.pending, oldestInputAt: spool.oldestAt, inputDropped: spool.dropped, ...(spool.droppedSaturated ? { inputDroppedSaturated: true } : {}) } : {})
     } : undefined;
-    emit(assemblePayload({ head, items, processing }).text);
+    // The room one item has alone, as assemblePayload measures it, less the
+    // few bytes its head grows by once there are items to count.
+    const room = DELIVERY_CAP_BYTES - bytes(assemblePayload({ head, items: [], processing }).text) - 24;
+    // The working set is ordered on the records, then each becomes its line.
+    const derived = (session ? sessionOrder(relevant.items) : relevant.items).map((item) => itemOf(item, records, true, room)).filter(Boolean);
+    // Lines first, then full records, each in the read's order: a full record
+    // of several kilobytes ranked first left no room for the relevant lines
+    // behind it (live proof run 2, case C3r).
+    const items = [...derived.filter((item) => item.tier === 'T1'), ...derived.filter((item) => item.tier !== 'T1')];
+    emit(assemblePayload({ head, items: session ? correctionsAfter(items) : items, processing }).text);
   } catch {
     // Degraded, never blocking: nothing on stderr and no exit code (§18.4). A
     // session start that failed after the read still says memory is unavailable.

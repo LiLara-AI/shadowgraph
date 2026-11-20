@@ -12,6 +12,14 @@
 - A capture spool entry whose failed attempt cannot be recorded is dropped with an `attempt_unrecorded` marker instead of holding the whole queue until it expires.
 - List the binding and access commands in `shadowgraph --help`; correct stale version headers, the CLI-versus-MCP default store guidance, and notes that called v0.44.4 incomplete.
 - Update the MCP gate test tooling to hono 4.13.18 and @hono/node-server 2.1.8 (seven Dependabot alerts).
+- A session start that delivers nothing now says why and what changes it: `extraction_not_active` when capture is on but extraction is not (captured work expires unread), `extraction_pending` when items wait for the worker. The Claude Code guide lists `raw_expired`, `maxItemsPerSession`, `maxStoreBytes` and `tool_calls_not_captured`.
+- A record whose full form can never fit the delivery payload is delivered as its line, with the omitted parts declared, instead of not at all.
+- An attempt whose reason the extractor kept without verifying it shows that reason, labelled `model-proposed, not verified`, instead of `reason unknown`.
+- A session start delivers a correction kept verbatim directly after the record it corrects, and the corrected record says in words that a later message corrects it. Nothing is closed automatically, as before.
+- A prompt whose only shared words are keyword stopwords ("use", "using", the Arabic particles), for example "ok, use that", no longer delivers a payload of unrelated records. Every term still ranks.
+- The spool-wait redaction test accepts `out_of_time` as well as `store_busy`, as the other spool deadline tests do on slow Windows runners.
+- `shadowgraph_context` keeps its advisory collections to the own project when `includeCrossProject: false` is passed with a `task`.
+- Add `shadowgraph --version` (`-v`).
 
 ## 0.44.4 (2026-11-12)
 

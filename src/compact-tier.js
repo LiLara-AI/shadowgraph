@@ -178,7 +178,9 @@ function reasonPart(record) {
   const state = causeStateOf(record);
   if (state === 'recorded') return `reason ${show(record.reason)} (recorded, ${vocab(record.causalClaim?.sourceClass ?? 'agent_claimed')})`;
   if (state === 'legacy_freetext') return `reason ${show(record.reason)} (legacy free text)`;
-  if (state === 'unknown') return 'reason unknown';
+  // Only the extractor records a cause as unknown: a reason it kept anyway is
+  // its own interpretation, which the claim checks did not establish.
+  if (state === 'unknown') return given(record.reason) ? `reason ${show(record.reason)} (model-proposed, not verified)` : 'reason unknown';
   if (state === 'not_recorded') return 'reason not recorded';
   return `reason ${show(record.reason)} (cause state ${show(state)})`;
 }
@@ -190,7 +192,7 @@ export function t1Parts(record) {
   const parts = [];
   const add = (name, text) => parts.push({ name, text });
   if (record.evidenceIndependence === 'derived_from_delivered_memory') add('evidenceIndependence', 'Derived from delivered memory; not independent corroboration');
-  if (record.correction?.status === 'model_proposed') add('correction', `Model-proposed correction relationship, not independently verified${record.correction.applied === false ? `; not applied: ${show(record.correction.recordId)} stays current, marked as corrected` : ''}; source statement ${show(record.correction.statement)}`);
+  if (record.correction?.status === 'model_proposed') add('correction', `Model-proposed correction relationship, not independently verified${record.correction.applied === false ? `; this later message corrects ${show(record.correction.recordId)}, which nothing closed automatically, so it is still marked current` : ''}; source statement ${show(record.correction.statement)}`);
   if (record.interpretation?.status === 'model_proposed') {
     add('interpretation', 'Model-proposed field interpretation, not verified facts; full source context is required before acting');
     add('sourceContext', `full source context ${show(record.interpretation.sourceText)}`);

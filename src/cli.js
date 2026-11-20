@@ -101,6 +101,7 @@ function formatUsageHelp() {
     '',
     'Options & Flags:',
     '  --help, -h                    Show this help message and exit (code 0)',
+    '  --version, -v                 Print the version and exit (code 0)',
     '  --args, -a <JSON>             Provide command payload as JSON string',
     '  --settings <path>             Path to assistant hook settings',
     '  --runtime <dir>               Pinned runtime directory for hooks',
@@ -130,6 +131,11 @@ function isHelpRequested(args) {
 }
 if (isHelpRequested(rawArgs)) {
   console.log(formatUsageHelp());
+  process.exit(0);
+}
+
+if (rawArgs[0] === '--version' || rawArgs[0] === '-v') {
+  console.log(VERSION);
   process.exit(0);
 }
 

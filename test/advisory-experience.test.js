@@ -197,6 +197,29 @@ test('Q1 & Q4: cross-project isolation in context() with advisory crossProjectEx
   assert.ok(ctxB.digest.counts.relevantToTask >= 1);
 });
 
+test('an explicit includeCrossProject: false keeps every advisory collection to the own project, even with a task', () => {
+  const graph = createShadowGraph();
+  graph.remember({ project: 'project-a', memoryType: 'preference', key: 'code-style', text: 'Always use ESM imports' });
+  graph.addAttempt({ project: 'project-a', task: 'Bulk import', solution: 'Parallel worker batch import', result: 'succeeded with batching', resultClass: 'succeeded' });
+  graph.addAttempt({ project: 'project-a', task: 'Bulk import', solution: 'Parallel worker import', result: 'failed: rate limit', resultClass: 'failed' });
+  const own = graph.addAttempt({ project: 'project-b', task: 'Bulk import', solution: 'Sequential worker import', result: 'succeeded slowly', resultClass: 'succeeded' });
+  const task = 'Bulk import worker';
+  const closed = graph.context({ project: 'project-b', task, includeCrossProject: false });
+  for (const name of ['userMemories', 'successfulApproaches', 'crossProjectExperience', 'relevantToTask']) {
+    assert.ok(closed[name].every((item) => (item.sourceProject ?? item.project) === 'project-b'), name);
+  }
+  assert.ok(closed.successfulApproaches.some((item) => item.id === own.id));
+  assert.ok(closed.relevantToTask.some((item) => item.id === own.id));
+  assert.equal(closed.userMemories.length, 0);
+  assert.equal(closed.crossProjectExperience.length, 0);
+  // Omitted and true keep the by-design default: a task turns the cross-project advisories on.
+  for (const options of [{}, { includeCrossProject: true }]) {
+    const open = graph.context({ project: 'project-b', task, ...options });
+    assert.equal(open.userMemories.length, 1);
+    assert.ok(open.crossProjectExperience.length > 0);
+  }
+});
+
 test('Q2 & Q3: flexible symbolic conditions and cross-project fact evaluation excluding contradicted facts', () => {
   // Symbolic operator parsing and formatting
   assert.equal(normalizeOperator('>='), 'gte');

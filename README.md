@@ -288,7 +288,8 @@ review guide](docs/mcp-compatibility.md#choosing-a-read-or-review-operation).
 | Codex Desktop UI or ordinary CLI launched elsewhere | Not observed by this wrapper |
 | Glama MCP container | Credential-free MCP surface; cannot capture a user's Windows Codex sessions by itself |
 
-The accepted Glama release read back on 2026-11-03 has display label **0.42.6** and runtime **0.43.2**, with
+The Glama container is pinned and released separately, so its release label and runtime can differ from the package
+version; the [Glama listing](https://glama.ai/mcp/servers/LiLara-AI/shadowgraph) shows the current ones. The release read back on 2026-11-03 had display label **0.42.6** and runtime **0.43.2**, with
 the 20-tool Workflow profile. See the [release/runtime identity mapping](docs/mcp-compatibility.md#accepted-0432-release-mapping-read-back-2026-11-03). A new package release alone does not update that container.
 
 ### Store locking and retry limits (0.43.1)

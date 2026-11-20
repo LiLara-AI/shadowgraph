@@ -4,6 +4,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { scratchDirectory } from '../tools/scratch-directory.js';
+import { VERSION } from '../src/version.js';
 import { buildToolCatalog, COMPACT_TOOL_NAMES, WORKFLOW_TOOL_NAMES } from '../src/mcp-tools.js';
 
 // ---------------------------------------------------------------------------
@@ -553,6 +554,15 @@ test('Tier 1: Feature 15 - CLI ergonomics: shadowgraph --help, -h, help exit 0 o
 
   const doctorResult = runCliSync(['doctor']);
   assert.match(doctorResult.stdout + doctorResult.stderr, /workflow/i, 'doctor must mention workflow profile');
+});
+
+test('CLI: --version and -v print the package version on stdout and exit 0; help lists the flag', () => {
+  for (const flag of ['--version', '-v']) {
+    const result = runCliSync([flag]);
+    assert.equal(result.status, 0, `shadowgraph ${flag} must exit 0`);
+    assert.equal(result.stdout.trim(), VERSION);
+  }
+  assert.match(runCliSync(['--help']).stdout, /--version, -v/);
 });
 
 test('Tier 1: Feature 16 - Wire budget script measures compact, workflow, and full profiles with headroom', async (t) => {

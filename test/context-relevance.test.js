@@ -185,6 +185,20 @@ test('PR-26 corrective: a word as common as "the", shared with a record, establi
   assert.deepEqual(graph.context({ project: 'alpha', query: 'what did we decide about the turbine?' }).relevant.items.map(idOf), [record.id], noise.id);
 });
 
+test('a keyword stopword such as "use" establishes no relevance, in English or Arabic; a specific word beside it still does', () => {
+  const graph = createShadowGraph({ now: () => NOW });
+  for (let i = 0; i < 12; i += 1) graph.addDecision({ project: 'alpha', title: `topic${i} choice`, chosen: `use option${i} for part${i}` });
+  const esbuild = graph.addDecision({ project: 'alpha', title: 'bundler', chosen: 'use esbuild for bundling' });
+  const arabic = graph.addDecision({ project: 'alpha', title: 'التقريب', chosen: 'التقريب المصرفي في الرواتب' });
+  for (const query of ['ok, use that', 'which should we use?', 'في من']) {
+    const chat = graph.context({ project: 'alpha', query }).relevant;
+    assert.equal(chat.relevance.established, false, query);
+    assert.equal(chat.fallback.used, true, query);
+  }
+  assert.deepEqual(graph.context({ project: 'alpha', query: 'use esbuild' }).relevant.items.map(idOf), [esbuild.id]);
+  assert.deepEqual(graph.context({ project: 'alpha', query: 'التقريب في الرواتب' }).relevant.items.map(idOf), [arabic.id]);
+});
+
 test('PR-26 corrective: every term still orders the hits, so a negation or a single letter still decides which comes first', () => {
   const graph = createShadowGraph({ now: () => NOW });
   // Each rival is the shorter record, so ranking by content words alone would put it first on score.
