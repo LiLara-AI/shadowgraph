@@ -290,10 +290,13 @@ function visible(record, options) {
 }
 
 // BM25 over every query term; `contentMatched` also names the records that
-// share at least one content word (not a function word) with the query.
+// share at least one content word with the query: not a function word, and not
+// one of the keyword stopwords above ("use", the Arabic particles), which name
+// no topic either ("ok, use that" matched every record that says "use").
+const namesNoTopic = (term) => FUNCTION_WORDS.has(term) || STOPWORDS.has(term);
 function lexicalRanking(candidates, query, { expandSynonyms = false } = {}) {
   const queryTerms = [...new Set(tokenize(query))];
-  const contentTerms = queryTerms.filter((term) => !FUNCTION_WORDS.has(term));
+  const contentTerms = queryTerms.filter((term) => !namesNoTopic(term));
   const contentMatched = new Set();
   if (!queryTerms.length) return { list: [], raw: new Map(), terms: [], contentTerms, contentMatched };
   if (!expandSynonyms) {
@@ -311,7 +314,7 @@ function lexicalRanking(candidates, query, { expandSynonyms = false } = {}) {
         if (!frequency) continue;
         const normalization = frequency + k1 * (1 - b + b * (item.tokens.length / Math.max(averageLength, 1)));
         raw.set(item.record.id, (raw.get(item.record.id) ?? 0) + idf * ((frequency * (k1 + 1)) / normalization));
-        if (!FUNCTION_WORDS.has(term)) contentMatched.add(item.record.id);
+        if (!namesNoTopic(term)) contentMatched.add(item.record.id);
       }
     }
     const list = [...raw.entries()].sort((left, right) => right[1] - left[1] || String(left[0]).localeCompare(String(right[0]))).map(([id]) => id);
@@ -342,7 +345,7 @@ function lexicalRanking(candidates, query, { expandSynonyms = false } = {}) {
       const frequency = stemFreq > 0 ? stemFreq : 0.6;
       const normalization = frequency + k1 * (1 - b + b * (item.tokens.length / Math.max(averageLength, 1)));
       raw.set(item.record.id, (raw.get(item.record.id) ?? 0) + idf * ((frequency * (k1 + 1)) / normalization));
-      if (!FUNCTION_WORDS.has(term)) contentMatched.add(item.record.id);
+      if (!namesNoTopic(term)) contentMatched.add(item.record.id);
     }
   }
   const list = [...raw.entries()].sort((left, right) => right[1] - left[1] || String(left[0]).localeCompare(String(right[0]))).map(([id]) => id);

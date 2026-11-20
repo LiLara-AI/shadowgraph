@@ -299,7 +299,7 @@ test('a user correction of a decision kept verbatim as a memory is linked, not a
   assert.equal(expanded.status, 'current');
   assert.deepEqual(expanded.correctedBy, [fresh.id], 'and so does its expansion');
   const { t1Line } = await import('../src/compact-tier.js');
-  assert.match(t1Line(fresh, { ceiling: 2048 }).line, new RegExp(`not applied: "${closed.id}" stays current, marked as corrected`));
+  assert.match(t1Line(fresh, { ceiling: 2048 }).line, new RegExp(`this later message corrects "${closed.id}", which nothing closed automatically, so it is still marked current`));
 });
 
 // Independent review: a correction of one statement closed a memory that also

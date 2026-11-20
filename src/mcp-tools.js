@@ -871,7 +871,7 @@ const defaultContextInputSchema = {
     focalId: { type: 'string', description: 'Entity id to rank graph neighbours from. An id outside the scope reaches nothing, like an unknown one.' },
     asOf: { type: 'string', description: 'ISO 8601 instant for relevant: facts and memories valid then, recency ordered from it, and lines derived as of it.' },
     compact: { type: 'boolean', description: 'With query or focalId, true delivers each relevant record as a shortened claim line (T1); false or omitted delivers full records. A line that would omit decisive meaning falls back to the full record. This controls record presentation, not the server tool mode. For example, query:"cache", compact:true adds relevant.items with expansion handles; compact:true alone does not add relevant.' },
-    includeCrossProject: { type: 'boolean', description: 'Include cross-project experience and advisory collections without requiring a task query.' }
+    includeCrossProject: { type: 'boolean', description: 'Include cross-project experience and advisory collections without requiring a task query; false keeps them to this project even with a task.' }
   }
 };
 const reviewContextOutputSchema = {
