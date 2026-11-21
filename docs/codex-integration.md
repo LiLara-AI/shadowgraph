@@ -75,7 +75,9 @@ From an enrolled workspace run `shadowgraph-codex run --home <private-dir>` and
 enter ordinary task prompts, one line per turn, or use `--prompt <text>`. No
 remember/search/extract command is required. The current implementation captures
 user text, final assistant messages and native command-execution events. Other
-tool-event coverage must be checked before claiming it. Extraction children are
+tool-event coverage must be checked before claiming it. Command-execution events
+are tool calls: they are kept as evidence and are not sent to the extraction
+model unless the owner asks to reprocess one. Extraction children are
 separate from the observed host stream, so they cannot recapture themselves.
 
 Ordinary interactive sessions have no demonstration turn/call/deadline ceiling.

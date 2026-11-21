@@ -14,7 +14,7 @@ import { privilegedClaimCapture, privilegedCompleteExtraction, privilegedExtract
 import { extractionSchema, OUTPUT_SCHEMA_VERSION, PROMPT_VERSION, extractionPrompt, extractionText, prepareExtraction, quotedRecipe } from './extraction-output.js';
 import { FROZEN_WORKER_BUDGETS, withWorkerBudget } from './extraction-budget.js';
 import { invokeWithRetry, awaitWorkerStep } from './extraction-policy.js';
-import { sessionJournalEntries, workerReason } from './extraction-session.js';
+import { isToolCall, sessionConversationCaptures, workerReason } from './extraction-session.js';
 import { registerInvocation } from './extraction-identity.js';
 
 const digest = value => createHash('sha256').update(value).digest('hex');
@@ -31,6 +31,19 @@ const raw = (payload, item) => (payload.captureContent ?? []).find(entry => entr
 // relevant of those it may name, found among this many records of the read.
 const MAX_CORRECTION_CANDIDATES = 4;
 const CANDIDATE_READ = 50;
+// Tool calls one scope sets aside in one transaction; the rest wait for the next round.
+const SET_ASIDE_BATCH = 64;
+const newLease = (options, at) => {
+  const leaseMs = options.leaseMs ?? 180000;
+  if (!Number.isSafeInteger(leaseMs) || leaseMs <= 0 || leaseMs > 300000) refusal('capture_lease_invalid');
+  return { leaseId: randomUUID(), ownerId: options.ownerId ?? `worker-${process.pid}`, ownerBootId: options.ownerBootId ?? randomUUID(),
+    leaseExpiresAt: new Date(Date.parse(at) + leaseMs).toISOString(), ...(options.accessId ? { accessId: options.accessId } : {}) };
+};
+// What every claim respects: the scope, this setup's binding, no cancel request, unexpired raw text.
+const claimable = (item, options, ledger, at) => item.kind === 'capture' && owns(item, options)
+  && (!options.extractionBinding || sameExtractionBinding(item.observation?.extractionBinding, options.extractionBinding))
+  && ['pending', 'processing'].includes(item.state) && !item.cancelRequested
+  && !captureRawExpired(item, ledger?.retentionOverrides ?? [], at);
 
 async function fenced(options, action) {
   const check = () => { if (options.signal?.aborted) refusal('drain_stopped'); };
@@ -62,10 +75,8 @@ export async function claimCapture(options) {
   if (options.provider === 'codex' && !validExtractionBinding(options.extractionBinding)) refusal('capture_provenance_required');
   return fenced(options, async ({ graph, ledger, at, commit }) => {
     const live = privilegedLiveSnapshot(graph);
-    const queue = live.records.filter(item => item.kind === 'capture' && owns(item, options)
-      && (!options.extractionBinding || sameExtractionBinding(item.observation?.extractionBinding, options.extractionBinding))
-      && ['pending', 'processing'].includes(item.state) && !item.cancelRequested
-      && !captureRawExpired(item, ledger?.retentionOverrides ?? [], at));
+    // A tool call reaches the model only on an owner's reprocess request (setAsideToolCalls settles the rest).
+    const queue = live.records.filter(item => claimable(item, options, ledger, at) && (!isToolCall(item) || item.reprocessRequest !== undefined));
     // Journal order survives wall-clock reversal. Imported/baselined work with
     // no unique creation witness cannot be ordered by inventing a timestamp or
     // occurrence-ordinal substitute; leave it untouched and fail closed.
@@ -76,7 +87,7 @@ export async function claimCapture(options) {
     }
     if (queue.some(item => !order.has(item.id)) || new Set(order.values()).size !== order.size) refusal('capture_order_unavailable');
     queue.sort((a, b) => order.get(a.id) - order.get(b.id));
-    const sessions = new Set();
+    const sessions = new Set(); let overCeiling = false;
     for (const item of queue) {
       // Pending alone is not an owner reprocessing request. Require the
       // explicit local request and its journal witness before any invocation.
@@ -92,14 +103,13 @@ export async function claimCapture(options) {
       }
       const session = JSON.stringify([item.originId, item.source.sessionId]);
       if (sessions.has(session)) continue; sessions.add(session);
+      // A session over its ceiling is passed over, its items left pending; other sessions go on (owner decision D3).
+      const conversation = sessionConversationCaptures(live.journal, item);
+      if (options.journalCeiling !== undefined && conversation > options.journalCeiling) { overCeiling = true; continue; }
       if (item.state === 'processing' && Date.parse(item.lease?.leaseExpiresAt) > Date.parse(at)) continue;
       const source = raw(live, item); if (typeof source !== 'string') continue;
       const text = extractionText(source); if (!text.trim()) continue;
-      const leaseMs = options.leaseMs ?? 180000;
-      if (!Number.isSafeInteger(leaseMs) || leaseMs <= 0 || leaseMs > 300000) refusal('capture_lease_invalid');
-      const lease = { leaseId: randomUUID(), ownerId: options.ownerId ?? `worker-${process.pid}`, ownerBootId: options.ownerBootId ?? randomUUID(),
-        leaseExpiresAt: new Date(Date.parse(at) + leaseMs).toISOString(), ...(options.accessId ? { accessId: options.accessId } : {}) };
-      const selected = { ...item, lease };
+      const lease = newLease(options, at), selected = { ...item, lease };
       if (claimAuthorityInvalid(selected, live, at)) continue;
       const generation = effectiveGeneration(selected, ledger, live, at);
       // Only this setup's independently sourced user decisions can be considered:
@@ -120,7 +130,7 @@ export async function claimCapture(options) {
             && sourceCapture?.source?.role === 'user' && sameExtractionBinding(sourceCapture.observation?.extractionBinding, options.extractionBinding)
             ? [{ recordId: record.id, priorChosen: prior, expectedHash: digest(JSON.stringify(original)) }] : [];
         }).slice(0, MAX_CORRECTION_CANDIDATES) : [];
-      options.beforeClaim?.({ inputBytes: Buffer.byteLength(extractionPrompt(item, text, { ...options, correctionCandidates })), journalEntries: sessionJournalEntries(live.journal, item) + 2 });
+      options.beforeClaim?.({ inputBytes: Buffer.byteLength(extractionPrompt(item, text, { ...options, correctionCandidates })), journalEntries: conversation });
       const claimed = privilegedClaimCapture(graph, { id: item.id, project: options.project, originId: options.originId, lease });
       if (!claimed) continue;
       await commit(privilegedSnapshot(graph));
@@ -128,7 +138,37 @@ export async function claimCapture(options) {
       return { status: 'claimed', id: item.id, token, leaseId: lease.leaseId, lease: structuredClone(lease), generation, rawHash: digest(text), text,
         item: claimed, correctionCandidates, promptVersion: promptVersion(options), schemaVersion: schemaVersion(options), model, provider: options.provider ?? 'claude' };
     }
-    return { status: 'idle' };
+    return { status: 'idle', ...(overCeiling ? { passedOver: 'session_journal' } : {}) };
+  });
+}
+
+// A tool call is set aside by code, never sent to the model (owner decision D2,
+// 2026-11-21): the acceptance rules can only turn one into a copy of its own
+// recorded input and output. It settles extracted with no records through the
+// ordinary claim and completion, with a receipt that says no model ran; its raw
+// stays as evidence for its normal retention. No usage is reserved and no item
+// of the drain is charged. An owner's reprocess request still sends one
+// (claimCapture). At most SET_ASIDE_BATCH per call, in one commit.
+export async function setAsideToolCalls(options) {
+  if (options.provider === 'codex' && !validExtractionBinding(options.extractionBinding)) refusal('capture_provenance_required');
+  return fenced(options, async ({ graph, ledger, at, commit }) => {
+    const live = privilegedLiveSnapshot(graph);
+    let settled = 0;
+    for (const item of live.records) {
+      if (settled >= SET_ASIDE_BATCH) break;
+      if (!claimable(item, options, ledger, at) || !isToolCall(item) || item.reprocessRequest !== undefined
+        || (item.state === 'processing' && Date.parse(item.lease?.leaseExpiresAt) > Date.parse(at))) continue;
+      const source = raw(live, item); if (typeof source !== 'string' || !extractionText(source).trim()) continue;
+      const lease = newLease(options, at), selected = { ...item, lease };
+      if (claimAuthorityInvalid(selected, live, at)) continue;
+      const generation = effectiveGeneration(selected, ledger, live, at);
+      if (!privilegedClaimCapture(graph, { id: item.id, project: options.project, originId: options.originId, lease })) continue;
+      privilegedCompleteExtraction(graph, { id: item.id, leaseId: lease.leaseId, prepared: { records: [], unsupported: [] }, key: item.id,
+        receipt: { at, generation, invocationStarted: false, notSent: 'tool_call' }, attemptCount: 0 });
+      settled += 1;
+    }
+    if (settled) await commit(privilegedSnapshot(graph));
+    return { settled, more: settled >= SET_ASIDE_BATCH };
   });
 }
 
@@ -214,7 +254,11 @@ export async function runExtractionDrain(options) {
   const selectScope = () => { const scope = scopes[scopeIndex]; options = { ...options, project: scope?.project, originId: scope?.originId }; };
   selectScope();
   // held: a refusal not yet committed, so a block before its commit still settles it on its item.
+  // overCeiling: a session over its ceiling was passed over in this scope (any: in this drain).
+  // setAsideMore: a scope had more tool calls than one batch, so the caller may run another round.
   let completed = 0, claimed = null, attempts = 0, cleanupFailed = null, held = null, refusedInScope = false;
+  let overCeilingInScope = false, overCeilingAny = false, setAsideMore = false;
+  const more = () => (setAsideMore ? { setAsideMore } : {});
   const blocked = async reason => {
     reason = workerReason(reason);
     const cleanup = { ...options, guard: undefined, signal: AbortSignal.timeout(cleanupMs), lockTimeoutMs: Math.min(options.lockTimeoutMs ?? 1000, 1000) };
@@ -227,7 +271,7 @@ export async function runExtractionDrain(options) {
       // A budget stop is ordinary operation; a refusal settled in this scope is the signal worth keeping.
       const shown = refusedInScope && BUDGET_STOPS.includes(reason) ? 'provider_refusal' : reason;
       const storeReceiptWritten = await recordWorkerStatus(cleanup, shown);
-      return { status: 'blocked', blockedReason: reason, completed, storeReceiptWritten };
+      return { status: 'blocked', blockedReason: reason, completed, storeReceiptWritten, ...more() };
     } catch (error) { cleanupFailed = reason; throw error; }
   };
   try {
@@ -236,15 +280,26 @@ export async function runExtractionDrain(options) {
       || (scope.originId !== undefined && (typeof scope.originId !== 'string' || !scope.originId.trim())))) refusal('capture_scope_required');
     if (!scopes.length) return { status: 'idle', completed: 0 };
     return await withWorkerBudget({ ...options, now: () => Date.parse(clock(options)), signal }, async budget => {
+      // Tool calls are set aside first, in every scope: no model call is made, so
+      // neither the hourly window nor a budget stop later in this drain holds them.
+      budget.check(); if (options.guard && !await awaitWorkerStep(options.guard, signal)) return blocked('drain_stopped');
+      for (const scope of scopes) {
+        budget.check();
+        if ((await setAsideToolCalls({ ...options, project: scope.project, originId: scope.originId, signal })).more) setAsideMore = true;
+      }
       for (;;) {
         budget.check(); if (options.guard && !await awaitWorkerStep(options.guard, signal)) return blocked('drain_stopped'); budget.check();
-        claimed = await claimCapture({ ...options, signal, leaseMs: 300000, beforeClaim: input => budget.admit(input) });
+        claimed = await claimCapture({ ...options, signal, leaseMs: 300000, journalCeiling: budget.budgets.journalEntriesPerSession, beforeClaim: input => budget.admit(input) });
         if (claimed.status !== 'claimed') {
+          if (claimed.passedOver) overCeilingInScope = true;
           claimed = null;
-          // A scope that settled a refusal says so, so a provider refusing every item is visible, not a quiet idle.
-          const storeReceiptWritten = await recordWorkerStatus({ ...options, signal }, refusedInScope ? 'provider_refusal' : null);
-          if (++scopeIndex < scopes.length) { selectScope(); refusedInScope = false; continue; }
-          return { status: 'idle', completed, storeReceiptWritten };
+          // A scope that settled a refusal says so, so a provider refusing every item is visible, not a quiet idle;
+          // a session passed over at its ceiling is named the same way, after the scope's other work is done.
+          const storeReceiptWritten = await recordWorkerStatus({ ...options, signal }, refusedInScope ? 'provider_refusal' : overCeilingInScope ? 'session_journal' : null);
+          overCeilingAny ||= overCeilingInScope;
+          if (++scopeIndex < scopes.length) { selectScope(); refusedInScope = false; overCeilingInScope = false; continue; }
+          return overCeilingAny ? { status: 'blocked', blockedReason: 'session_journal', completed, storeReceiptWritten, ...more() }
+            : { status: 'idle', completed, storeReceiptWritten, ...more() };
         }
         attempts = 0;
         const correlationToken = `sgcorr_${randomUUID()}`;
@@ -268,7 +323,9 @@ export async function runExtractionDrain(options) {
         const result = await commitCapture({ ...options, signal, attemptCount: attempts, journalCeiling: budget.budgets.journalEntriesPerSession }, claimed, response);
         claimed = null; held = null;
         if (result.status === 'provider_refusal') refusedInScope = true;
-        if (result.status === 'worker_blocked') return blocked('session_journal');
+        // Its session passed the ceiling while the item was out (a capture recorded since the claim): the item is
+        // back to pending and the next claim passes the session over, so other work goes on.
+        if (result.status === 'worker_blocked') overCeilingInScope = true;
         if (result.status === 'committed') completed += 1;
       }
     });

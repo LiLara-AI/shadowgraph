@@ -86,7 +86,8 @@ export async function runActivatedExtraction({ env = process.env, project, origi
         // over, or a trigger that arrived while it ran, is taken by another
         // round of this worker, each round bounded the same way, the hourly
         // window and the worker's wall time over them all. A trigger is never
-        // lost to a busy worker.
+        // lost to a busy worker. Each round first sets the scopes' tool calls
+        // aside by code (setAsideToolCalls), a bounded batch per scope.
         for (let round = 0; ; round += 1) {
           const roundStarted = Date.now();
           const found = await scopesNow();
@@ -107,7 +108,8 @@ export async function runActivatedExtraction({ env = process.env, project, origi
             void pending.then(() => running.delete(pending), () => running.delete(pending)); return pending;
           } } });
           completed += result?.completed ?? 0; rounds += 1;
-          const more = result?.status === 'blocked' && ['drain_items', 'drain_calls'].includes(result.blockedReason);
+          // More work: a drain budget stop, or tool calls past one round's batch (set aside without a model call).
+          const more = (result?.status === 'blocked' && ['drain_items', 'drain_calls'].includes(result.blockedReason)) || result?.setAsideMore === true;
           if (!automatic || round + 1 >= MAX_ROUNDS || controller.signal.aborted || !(more || await requestedSince(env, roundStarted))) break;
         }
       } finally {

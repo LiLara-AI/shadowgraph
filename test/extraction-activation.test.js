@@ -255,18 +255,19 @@ test('trigger only requests detached one-shot extraction after eligible capture;
   const options = { env: f.env, runtimeDirectory: f.options.runtime, deadline: Date.now() + 5000, spawnProcess: (...args) => {
     calls.push(args); const child = new EventEmitter(); child.unref = () => { unrefs++; }; return child;
   } };
-  for (const event of ['Stop', 'SessionEnd']) assert.equal((await triggerExtraction({ ...options, event, outcome: 'written' })).status, 'requested');
-  assert.equal(calls.length, 2); assert.equal(unrefs, 2);
+  // A prompt starts it too, so a queue the hourly window left waiting drains when the session is used again.
+  for (const event of ['Stop', 'SessionEnd', 'UserPromptSubmit']) assert.equal((await triggerExtraction({ ...options, event, outcome: 'written' })).status, 'requested');
+  assert.equal(calls.length, 3); assert.equal(unrefs, 3);
   for (const [executable, args, spawnOptions] of calls) {
     assert.equal(executable, process.execPath); assert.deepEqual(args.slice(1), ['extract', '--automatic']);
     assert.equal(spawnOptions.detached, true); assert.equal(spawnOptions.windowsHide, true); assert.equal(spawnOptions.shell, false); assert.equal(spawnOptions.stdio, 'ignore');
     assert.equal(spawnOptions.env.SHADOWGRAPH_HOME, f.env.SHADOWGRAPH_HOME);
   }
-  for (const patch of [{ event: 'UserPromptSubmit' }, { outcome: 'self_event' }, { outcome: 'out_of_time' }, { deadline: 0 }, { runtimeDirectory: f.root }]) {
+  for (const patch of [{ event: 'PostToolUse' }, { event: 'PreCompact' }, { event: 'UserPromptSubmit', outcome: 'out_of_time' }, { outcome: 'self_event' }, { outcome: 'out_of_time' }, { deadline: 0 }, { runtimeDirectory: f.root }]) {
     assert.equal((await triggerExtraction({ ...options, event: 'Stop', outcome: 'written', ...patch })).status, 'inert');
   }
   await (await activation()).deactivateExtraction({ env: f.env });
-  assert.equal((await triggerExtraction({ ...options, event: 'Stop', outcome: 'written' })).status, 'inert'); assert.equal(calls.length, 2);
+  assert.equal((await triggerExtraction({ ...options, event: 'Stop', outcome: 'written' })).status, 'inert'); assert.equal(calls.length, 3);
 });
 test('the requested worker inherits no host-session provider route or session token', async t => {
   const f = await activated(t), { triggerExtraction } = await import('../src/internal/extraction-trigger.js'); let spawned;

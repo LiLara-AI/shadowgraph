@@ -12,7 +12,7 @@ Claude Desktop, the interactive TUI's resume flows and other platforms are outsi
 | Step | What runs | Notes |
 | --- | --- | --- |
 | Capture | `capture --hook` on UserPromptSubmit, PostToolUse, PostToolUseFailure, Stop, PreCompact and SessionEnd | Each event is redacted and kept in an owner-only spool before the store is touched (see below). |
-| Extraction | Spawned after Stop or SessionEnd as a detached one-shot worker | It runs `claude -p` as a **separate executor**, with no tools, MCP servers, hooks, skills or settings, on the model you selected. It never shares the host session's process. |
+| Extraction | Spawned after a prompt, Stop or SessionEnd as a detached one-shot worker; tool calls are kept as evidence and not sent to it | It runs `claude -p` as a **separate executor**, with no tools, MCP servers, hooks, skills or settings, on the model you selected. It never shares the host session's process. |
 | Delivery | `deliver --hook` on SessionStart and UserPromptSubmit | SessionStart delivers the project's working set, each record as its line (the full record only when the line would drop a decisive part). A prompt receives what is relevant to it. |
 | Sharing | `shadowgraph sharing …` | Project-only by default. |
 
