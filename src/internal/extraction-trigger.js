@@ -25,7 +25,10 @@ export const workerEnvironment = env => Object.fromEntries(Object.entries(env)
 export async function triggerExtraction({ event, outcome, deadline, env = process.env, spawnProcess = spawn,
   runtimeDirectory = dirname(dirname(dirname(fileURLToPath(import.meta.url)))) } = {}) {
   const inert = { status: 'inert' };
-  if (!['Stop', 'SessionEnd'].includes(event) || !ELIGIBLE.has(outcome) || !Number.isFinite(deadline) || Date.now() >= deadline) return inert;
+  // A prompt starts it too, so work the hourly window left waiting drains when the
+  // session is used again, not only when a turn ends. A worker already running
+  // takes the request at its next round (extraction-runtime.js); the hook never waits.
+  if (!['Stop', 'SessionEnd', 'UserPromptSubmit'].includes(event) || !ELIGIBLE.has(outcome) || !Number.isFinite(deadline) || Date.now() >= deadline) return inert;
   try {
     const activation = await activeExtraction(env);
     if (!activation || await canonicalPath(runtimeDirectory) !== activation.runtime.path || Date.now() >= deadline) return inert;

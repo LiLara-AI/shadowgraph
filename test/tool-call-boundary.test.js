@@ -13,8 +13,8 @@ import { EXTRACTION_MODEL, PROMPT_VERSION } from '../src/internal/extraction-con
 import { extractionPrompt, extractionText, prepareExtraction } from '../src/internal/extraction-output.js';
 import { classifyClaim } from '../src/verification.js';
 import { attemptOutcome } from '../src/internal/outcome.js';
-import { privilegedExpireCapture, privilegedRecordCapture, privilegedSnapshot } from '../src/internal/snapshot.js';
-import { claimCapture, commitCapture } from '../src/internal/extraction-worker.js';
+import { privilegedExpireCapture, privilegedRecordCapture, privilegedRequestReprocess, privilegedSnapshot } from '../src/internal/snapshot.js';
+import { claimCapture, commitCapture, setAsideToolCalls } from '../src/internal/extraction-worker.js';
 import { getRuntimeCapabilities } from '../src/runtime-capabilities.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
 
@@ -313,6 +313,17 @@ test('a proved split ignores a boundary the text hash does not cover', () => {
 });
 
 const sqlite = (await getRuntimeCapabilities()).nodeSqlite;
+// A tool call reaches the model only on an owner's reprocess request (owner decision D2): it is set aside by
+// code first, never claimed, and the owner then asks for it.
+async function requestToolCall(options, id) {
+  assert.equal((await claimCapture(options)).status, 'idle');
+  assert.deepEqual(await setAsideToolCalls(options), { settled: 1, more: false });
+  const store = await createStorage(options);
+  try {
+    const graph = createShadowGraph({ now: options.now }); graph.importData(await store.load());
+    privilegedRequestReprocess(graph, { project: 'p', id }); await store.save(privilegedSnapshot(graph));
+  } finally { store.close(); }
+}
 for (const type of ['json', 'sqlite']) {
   const skip = type === 'sqlite' && !sqlite.available ? { skip: sqlite.reason } : {};
   test(`worker ${type}: a captured tool call's outcome comes from capture, not from the tool's text`, skip, async (t) => {
@@ -331,6 +342,7 @@ for (const type of ['json', 'sqlite']) {
     await store.save(privilegedSnapshot(graph));
     store.close();
     const options = { type, file, env, now: () => START, project: 'p', ownerId: 'fixture-worker', ownerBootId: 'fixture-boot' };
+    await requestToolCall(options, item.id);
     const claim = await claimCapture(options);
     assert.equal(claim.status, 'claimed');
     assert.equal(claim.item.toolInputBoundary, item.toolInputBoundary);
@@ -372,6 +384,7 @@ for (const type of ['json', 'sqlite']) {
     });
     const next = await createStorage({ type, file, env });
     try { await next.save(privilegedSnapshot(again)); } finally { next.close(); }
+    await requestToolCall(options, success.id);
     const claimed = await claimCapture(options);
     assert.equal(claimed.id, success.id);
     const solution = claimed.text.slice(0, claimed.item.toolInputBoundary);

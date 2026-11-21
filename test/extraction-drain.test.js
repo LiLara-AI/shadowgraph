@@ -4,9 +4,10 @@ import { readdir, readFile, writeFile, rename } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createStorage } from '../src/storage.js';
 import { createShadowGraph } from '../src/shadowgraph.js';
-import { privilegedRecordCapture, privilegedSnapshot, privilegedRebuild } from '../src/internal/snapshot.js';
+import { privilegedInspectCapture, privilegedRecordCapture, privilegedRequestReprocess, privilegedSnapshot, privilegedRebuild } from '../src/internal/snapshot.js';
 import { backupFile, restoreFile } from '../src/backup.js';
-import { CLEANUP_BOUND_FOR_TESTS, claimCapture, runExtractionDrain } from '../src/internal/extraction-worker.js';
+import { CLEANUP_BOUND_FOR_TESTS, claimCapture, runExtractionDrain, setAsideToolCalls } from '../src/internal/extraction-worker.js';
+import { sessionConversationCaptures } from '../src/internal/extraction-session.js';
 import { storeIo } from '../src/internal/deletion-knowledge.js';
 import { initializeUsage, FROZEN_WORKER_BUDGETS, usageFile } from '../src/internal/extraction-budget.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
@@ -65,6 +66,15 @@ function storeTrace({ holdCleanup = false, releaseAfterMs } = {}) {
     } catch (error) { entry.openError = String(error?.code ?? error?.name ?? 'error'); done(); throw error; }
   };
   return { openStore, events, release: () => release(), releasedAt: () => releasedAt, settled: () => Promise.all(closed), cleanups: () => events.filter(entry => entry.kind === 'cleanup'), signalOf: entry => signals.get(entry) };
+}
+// Synthetic captures added to a fixture's store: conversation items, or tool calls (PostToolUse/PostToolUseFailure).
+let toolCallIds = 0;
+async function addCaptures(f, list) {
+  const graph = createShadowGraph({ now: f.options.now }); graph.importData(await f.read());
+  const items = list.map(({ event, sessionId = 'synthetic-session', project = 'p', text }, i) => privilegedRecordCapture(graph, { project, originId: 'synthetic-origin',
+    text: text ?? `Synthetic ${event} ${i}.`, admission, source: { event, sessionId, ...(event.startsWith('PostToolUse') ? { toolCallId: `synthetic-tool-${++toolCallIds}` } : {}) } }));
+  const store = await createStorage(f.options); try { await store.save(privilegedSnapshot(graph)); } finally { store.close(); }
+  return items;
 }
 const usageCalls = async env => JSON.parse(await readFile(usageFile(env))).calls.length;
 const workerErrors = data => { const g = createShadowGraph(); g.importData(data); return g.search('', { project: 'p' }).completeness.capture.workerErrors ?? []; };
@@ -163,7 +173,7 @@ for (const type of ['json', 'sqlite']) {
   // bound's enforcement has tests of its own below. Nothing but `blocked` with
   // the exact reason, receipt, usage and state passes.
   test(`drain ${type}: each budget blocks with pending work intact`, skip, async t => {
-    for (const [budgets, reason, expectedCalls] of [[{ inputBytes: 1 }, 'input_bytes', 0], [{ journalEntriesPerSession: 1 }, 'session_journal', 0], [{ calls: 1 }, 'drain_calls', 1], [{ items: 1 }, 'drain_items', 1], [{ windowCalls: 1 }, 'window_calls', 1]]) {
+    for (const [budgets, reason, expectedCalls] of [[{ inputBytes: 1 }, 'input_bytes', 0], [{ calls: 1 }, 'drain_calls', 1], [{ items: 1 }, 'drain_items', 1], [{ windowCalls: 1 }, 'window_calls', 1]]) {
       const f = await setup(t, type, 2, budgets), trace = storeTrace(); let calls = 0;
       const result = await runExtractionDrain({ ...f.options, openStore: trace.openStore, [CLEANUP_BOUND_FOR_TESTS]: 60_000, executor: { extract: async () => { calls++; return f.response; } } });
       await trace.settled();
@@ -265,13 +275,18 @@ for (const type of ['json', 'sqlite']) {
     assert.equal(unseamed.cleanups()[0].aborted?.reason, 'TimeoutError');
     assert.deepEqual(armedWith(timeouts, unseamed), [1000], 'a later drain without the seam is armed with the production bound');
   });
+  // The ceiling is read again at completion: a conversation capture recorded while the item was out passes it.
   test(`drain ${type}: output journal ceiling rolls back every proposed canonical record`, skip, async t => {
-    const f = await setup(t, type, 1, { journalEntriesPerSession: 3 });
+    const f = await setup(t, type, 1, { journalEntriesPerSession: 1 });
     const response = { ...f.response, value: { records: [{ kind: 'memory', fields: [{ name: 'text', text: 'Synthetic observation 0.', sourceRef: f.items[0].id }] }] } };
-    const result = await runExtractionDrain({ ...f.options, executor: { extract: async () => response } });
-    assert.equal(result.status, 'blocked'); assert.equal(result.blockedReason, 'session_journal');
+    let calls = 0;
+    const result = await runExtractionDrain({ ...f.options, executor: { extract: async () => {
+      calls++; await addCaptures(f, [{ event: 'Stop', sessionId: 'synthetic-session', text: 'A later synthetic report.' }]); return response;
+    } } });
+    assert.equal(result.status, 'blocked'); assert.equal(result.blockedReason, 'session_journal'); assert.equal(calls, 1, 'the session over its ceiling is passed over, not sent again');
     const data = await f.read(); assert.equal(data.records.filter(x => x.kind !== 'capture').length, 0);
-    assert.equal(data.records.find(x => x.kind === 'capture').state, 'pending');
+    assert.deepEqual(data.records.filter(x => x.kind === 'capture').map(x => x.state), ['pending', 'pending']);
+    assert.ok(workerErrors(data).some(x => x.reason === 'session_journal'));
     const g = createShadowGraph(); g.importData(data); assert.equal(privilegedRebuild(g).rebuildable, true);
   });
   test(`drain ${type}: failed response commit retains lease and recovers unknown period on a later write`, skip, async t => {
@@ -476,4 +491,101 @@ test('only tests name the drain cleanup seam; production keeps the one-second bo
   }
   assert.deepEqual(naming, ['src/internal/extraction-worker.js']);
   assert.match(await readFile(new URL('src/internal/extraction-worker.js', repo), 'utf8'), /^const CLEANUP_BOUND_MS = 1000;$/mu);
+});
+
+// Tool calls are set aside by code (owner decision D2) and the session ceiling counts conversation captures
+// only (D3). A tool call never reaches the model unless the owner asks to reprocess it.
+const captures = data => data.records.filter(x => x.kind === 'capture');
+const toolCall = x => x.source.event.startsWith('PostToolUse');
+for (const type of ['json', 'sqlite']) {
+  const skip = backendSkip(type);
+  test(`drain ${type}: tool calls are set aside without a model call, conversation items are sent in order`, skip, async t => {
+    const f = await setup(t, type, 1);
+    await addCaptures(f, [{ event: 'PostToolUse' }, { event: 'PostToolUseFailure' }, { event: 'Stop', text: 'Synthetic end-of-turn report.' }, { event: 'PostToolUse' }]);
+    const before = await f.read(), prompts = [];
+    const out = await runExtractionDrain({ ...f.options, executor: { extract: async request => { prompts.push(request.prompt); return f.response; } } });
+    assert.deepEqual([out.status, out.completed, prompts.length], ['idle', 2, 2]);
+    assert.equal(await usageCalls(f.options.env), 2, 'usage is reserved for the conversation items only');
+    assert.match(prompts[0], /Synthetic observation 0\./u); assert.match(prompts[1], /Synthetic end-of-turn report\./u);
+    const data = await f.read(), g = createShadowGraph({ now: f.options.now }); g.importData(data);
+    assert.equal(data.records.filter(x => x.kind !== 'capture').length, 0);
+    for (const item of captures(data).filter(toolCall)) {
+      assert.deepEqual([item.state, item.producedRecordIds, item.attempts, item.lease, item.receipts.length], ['extracted', [], 0, null, 1]);
+      assert.deepEqual(Object.keys(item.receipts[0]).sort(), ['at', 'generation', 'invocationStarted', 'notSent']);
+      assert.deepEqual([item.receipts[0].invocationStarted, item.receipts[0].notSent], [false, 'tool_call']);
+      const prior = captures(before).find(x => x.id === item.id);
+      assert.deepEqual([item.contentRef, item.contentHash, item.expiresAt], [prior.contentRef, prior.contentHash, prior.expiresAt]);
+      assert.equal(data.captureContent.find(x => x.contentRef === item.contentRef).text, before.captureContent.find(x => x.contentRef === item.contentRef).text, 'the raw stays as evidence');
+      const seen = privilegedInspectCapture(g, { project: 'p', id: item.id }).items[0];
+      assert.deepEqual([seen.recipeChanged, seen.reprocessable, seen.producedRecords], [false, false, []], 'a receipt with no model run is never read as a stale model result');
+    }
+    // An owner's reprocess request still sends a tool call to the model.
+    const [first] = captures(data).filter(toolCall);
+    privilegedRequestReprocess(g, { project: 'p', id: first.id });
+    const store = await createStorage(f.options); try { await store.save(privilegedSnapshot(g)); } finally { store.close(); }
+    const again = await runExtractionDrain({ ...f.options, executor: { extract: async request => { prompts.push(request.prompt); return f.response; } } });
+    assert.deepEqual([again.status, again.completed, prompts.length], ['idle', 1, 3]);
+    assert.match(prompts[2], /Synthetic PostToolUse 0\./u);
+    const reprocessed = captures(await f.read()).find(x => x.id === first.id);
+    assert.deepEqual([reprocessed.state, reprocessed.receipts.length, reprocessed.receipts[1].invocationStarted], ['extracted', 2, true]);
+  });
+  test(`drain ${type}: tool calls are set aside when the hourly window is used up, never when the drain is stopped`, skip, async t => {
+    const f = await setup(t, type, 1, { windowCalls: 1 });
+    await addCaptures(f, [{ event: 'PostToolUse' }, { event: 'PostToolUseFailure' }]);
+    let calls = 0; const extract = async () => { calls++; return f.response; };
+    const stopped = await runExtractionDrain({ ...f.options, guard: async () => false, executor: { extract } });
+    assert.deepEqual([stopped.status, stopped.blockedReason], ['blocked', 'drain_stopped']);
+    assert.deepEqual(captures(await f.read()).map(x => x.state), ['pending', 'pending', 'pending']);
+    await writeFile(usageFile(f.options.env), `${JSON.stringify({ version: 1, highWater: Date.parse(START), calls: [Date.parse(START)] })}\n`);
+    const out = await runExtractionDrain({ ...f.options, executor: { extract } });
+    assert.deepEqual([out.status, out.blockedReason, calls], ['blocked', 'window_calls', 0]);
+    const data = await f.read();
+    assert.deepEqual(captures(data).map(x => [x.source.event, x.state]), [['UserPromptSubmit', 'pending'], ['PostToolUse', 'extracted'], ['PostToolUseFailure', 'extracted']]);
+    assert.ok(workerErrors(data).some(x => x.reason === 'window_calls'));
+  });
+  test(`drain ${type}: a session over its ceiling is passed over and stops no other session, scope or later drain`, skip, async t => {
+    const f = await setup(t, type, 3, { journalEntriesPerSession: 2 });
+    await addCaptures(f, [{ event: 'UserPromptSubmit', sessionId: 'second-session', text: 'Second session prompt.' }, { event: 'UserPromptSubmit', sessionId: 'other-session', project: 'q', text: 'Other project prompt.' }]);
+    let calls = 0; const extract = async () => { calls++; return f.response; };
+    const out = await runExtractionDrain({ ...f.options, scopes: [{ project: 'p' }, { project: 'q' }], executor: { extract } });
+    assert.deepEqual([out.status, out.blockedReason, out.completed, calls], ['blocked', 'session_journal', 2, 2]);
+    let data = await f.read();
+    assert.deepEqual(captures(data).map(x => [x.source.sessionId, x.state]), [['synthetic-session', 'pending'], ['synthetic-session', 'pending'], ['synthetic-session', 'pending'], ['second-session', 'extracted'], ['other-session', 'extracted']]);
+    assert.ok(workerErrors(data).some(x => x.reason === 'session_journal'), 'the passed-over session is named in its scope');
+    const g = createShadowGraph(); g.importData(data);
+    assert.equal(g.search('', { project: 'q' }).completeness.capture.workerErrors, undefined, 'the other scope is clean');
+    // A later drain is not starved by the same items: new work in another session is taken, nothing is spent on them.
+    await addCaptures(f, [{ event: 'Stop', sessionId: 'third-session', text: 'Third session report.' }]);
+    const later = await runExtractionDrain({ ...f.options, executor: { extract } });
+    assert.deepEqual([later.status, later.blockedReason, later.completed, calls], ['blocked', 'session_journal', 1, 3]);
+    data = await f.read();
+    assert.equal(captures(data).find(x => x.source.sessionId === 'third-session').state, 'extracted');
+    assert.equal(captures(data).filter(x => x.state === 'pending').length, 3);
+  });
+  test(`drain ${type}: the session ceiling counts conversation captures, not tool calls or journal entries`, skip, async t => {
+    const f = await setup(t, type, 2, { journalEntriesPerSession: 2 });
+    await addCaptures(f, Array.from({ length: 5 }, (_, i) => ({ event: i % 2 ? 'PostToolUseFailure' : 'PostToolUse' })));
+    let data = await f.read();
+    assert.equal(sessionConversationCaptures(data.journal, captures(data)[0]), 2);
+    let calls = 0;
+    const out = await runExtractionDrain({ ...f.options, executor: { extract: async () => { calls++; return f.response; } } });
+    assert.deepEqual([out.status, out.completed, calls], ['idle', 2, 2]);
+    data = await f.read();
+    assert.ok(captures(data).every(x => x.state === 'extracted'));
+    assert.ok(data.journal.length > 2, 'the session holds far more journal entries than its ceiling');
+    assert.equal(sessionConversationCaptures(data.journal, captures(data)[0]), 2);
+  });
+}
+
+test('tool calls are set aside in bounded batches; a drain says when more wait', async t => {
+  const f = await setup(t, 'json', 0);
+  await addCaptures(f, Array.from({ length: 65 }, () => ({ event: 'PostToolUse' })));
+  let calls = 0; const extract = async () => { calls++; return f.response; };
+  const first = await runExtractionDrain({ ...f.options, executor: { extract } });
+  assert.deepEqual([first.status, first.setAsideMore, calls], ['idle', true, 0]);
+  assert.equal(captures(await f.read()).filter(x => x.state === 'extracted').length, 64);
+  assert.deepEqual(await setAsideToolCalls(f.options), { settled: 1, more: false });
+  const last = await runExtractionDrain({ ...f.options, executor: { extract } });
+  assert.deepEqual([last.status, last.setAsideMore, calls], ['idle', undefined, 0]);
+  assert.ok(captures(await f.read()).every(x => x.state === 'extracted'));
 });
