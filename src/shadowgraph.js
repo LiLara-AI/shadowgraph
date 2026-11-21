@@ -21,7 +21,7 @@ import { extractionSupersession } from './internal/extraction-supersession.js';
 import { accessScopeContains, validateAccess, intersectAccessScope, accessDiagnostics, reconcileAccessLedger } from './access.js';
 import { createAccessLifecycle } from './internal/access-lifecycle.js';
 import { assertCreationInput } from './internal/creation-id.js';
-import { EXTRACTION_RECIPE, CURRENT_EXTRACTION_MODELS, CODEX_EXTRACTION_MODEL, CODEX_PROMPT_VERSION, CODEX_OUTPUT_SCHEMA_VERSION } from './internal/extraction-contract.js';
+import { EXTRACTION_RECIPE, CURRENT_EXTRACTION_MODELS, CODEX_EXTRACTION_MODEL, CODEX_PROMPT_VERSION, CODEX_OUTPUT_SCHEMA_VERSION, QUOTED_PROMPT_VERSIONS } from './internal/extraction-contract.js';
 import { attemptOutcome } from './internal/outcome.js';
 import { RUNTIME_MISSES, missReachedBy, runtimeMissLedgerIssue, withFallbackMisses } from './internal/miss-ledger.js';
 import { supersessionOrder, temporalEvidence, versionTimes } from './internal/temporal-evidence.js';
@@ -1524,7 +1524,7 @@ export function createShadowGraph(options = {}) {
       const last = item.receipts.at(-1);
       // A Claude receipt on the quoted recipe ran the model its activation selected.
       const recipe = last?.provider === 'codex' ? { ...EXTRACTION_RECIPE, model: CODEX_EXTRACTION_MODEL, promptVersion: CODEX_PROMPT_VERSION, schemaVersion: CODEX_OUTPUT_SCHEMA_VERSION }
-        : last?.promptVersion === CODEX_PROMPT_VERSION && CURRENT_EXTRACTION_MODELS.includes(last.model) ? { model: last.model, promptVersion: CODEX_PROMPT_VERSION, schemaVersion: CODEX_OUTPUT_SCHEMA_VERSION } : EXTRACTION_RECIPE;
+        : QUOTED_PROMPT_VERSIONS.includes(last?.promptVersion) && CURRENT_EXTRACTION_MODELS.includes(last.model) ? { model: last.model, promptVersion: CODEX_PROMPT_VERSION, schemaVersion: CODEX_OUTPUT_SCHEMA_VERSION } : EXTRACTION_RECIPE;
       const recipeChanges = item.state === 'extracted'
         ? Object.keys(recipe).filter(key => item.receipts.at(-1)?.[key] !== recipe[key]) : [];
       const lastReprocessing = item.receipts.at(-1)?.reprocessing;

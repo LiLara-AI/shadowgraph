@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { createStorage } from '../src/storage.js';
 import { createShadowGraph } from '../src/shadowgraph.js';
-import { privilegedRecordCapture, privilegedSnapshot } from '../src/internal/snapshot.js';
+import { privilegedClaimCapture, privilegedCompleteExtraction, privilegedInspectCapture, privilegedRecordCapture, privilegedSnapshot } from '../src/internal/snapshot.js';
 import { claimCapture, commitCapture } from '../src/internal/extraction-worker.js';
 import { extractionPrompt, prepareExtraction } from '../src/internal/extraction-output.js';
 import { QUOTED_RECIPE } from '../src/internal/extraction-contract.js';
@@ -57,11 +57,15 @@ test('a message that also asks a question keeps its statements, never the questi
   assert.equal(rest.length, 0, 'the question is not experience');
   assert.equal(record.values.text, lesson);
   assert.equal(record.interpretation.sourceText, asking);
-  // The verifier does not class a text with a question as a statement, and is
-  // not asked to: the claim says only that these are the message's own words.
-  assert.deepEqual(record.claims.map(({ text, class: cls, rule, span }) => ({ text, cls, rule, span })),
-    [{ text: asking, cls: 'entailed', rule: 'whole-source-v1', span: { start: 0, end: asking.length } }]);
-  assert.match(record.interpretation.limitation, /question/);
+  // The verifier does not class a text with a question mark as a statement,
+  // and is not asked to: the record carries the message and no checked claim.
+  assert.deepEqual(record.claims, []);
+  assert.match(record.interpretation.limitation, /no checked claim/);
+  // The same for a question mark that asks nothing, and an Arabic question is a question.
+  const linked = `I opened https://example.test/search?q=export to check. ${lesson} That is all for now.`;
+  assert.deepEqual(prepareExtraction(item, linked, memory(lesson), quoted).records.map(kept => [kept.values.text, kept.claims.length]), [[lesson, 0]]);
+  const arabic = 'هل نستخدم المسار القصير؟';
+  assert.equal(prepareExtraction(item, `${report} ${arabic}`, memory(arabic), quoted).records.length, 0);
   // A decision in such a message is kept the same way.
   const chosen = 'We use the short staging path for the export job.';
   const rejected = 'The long path under the user profile fails on Windows.';
@@ -69,7 +73,51 @@ test('a message that also asks a question keeps its statements, never the questi
   const decision = prepareExtraction(item, deciding, { records: [{ kind: 'decision', fields: [['chosen', chosen], ['alternative', rejected]].map(([name, text]) => ({ name, text, sourceRef: item.id })) }] }, quoted).records[0];
   assert.equal(decision.kind, 'decision');
   assert.equal(decision.values.chosen, chosen);
-  assert.equal(decision.claims[0].rule, 'whole-source-v1');
+  assert.deepEqual(decision.claims, []);
+});
+
+test('a selection is a whole statement: a fragment that leaves out the negation of its sentence is refused', () => {
+  const source = 'We will not use Redis for the cache. It is too slow for this workload. The fixture run is finished.';
+  const kept = (text) => prepareExtraction(item, source, memory(text), quoted).records.map(record => record.values.text);
+  assert.deepEqual(kept('use Redis for the cache'), [], 'the negation is outside the fragment');
+  assert.deepEqual(kept('edis for the ca'), [], 'cut through words');
+  assert.deepEqual(kept('It is too slow for this workload'), ['It is too slow for this workload'], 'a sentence without its full stop');
+  assert.deepEqual(kept('We will not use Redis for the cache. It is too slow for this workload.'), ['We will not use Redis for the cache. It is too slow for this workload.'], 'two whole sentences');
+  // A label before the statement, and markup around it, say nothing.
+  const listed = ['- **Throughput:** the worker makes 12 calls an hour.', '- **Every statement was dropped.** The queue never reached the reports.', '- Not here: the store is never full.'].join('\n');
+  const from = (text) => prepareExtraction(item, listed, memory(text), quoted).records.length;
+  assert.equal(from('the worker makes 12 calls an hour.'), 1);
+  assert.equal(from('The queue never reached the reports.'), 1);
+  assert.equal(from('**Every statement was dropped.**'), 1);
+  assert.equal(from('the store is never full.'), 0, 'a label that negates is not a label');
+});
+
+test('a decision the model also lists as a memory of the same sentence is kept as the decision, in either order', () => {
+  const chosen = 'We use the short staging path for the export job.';
+  const source = `The fixture run is finished. ${chosen} Next I will add a check.`;
+  const decision = { kind: 'decision', fields: [{ name: 'chosen', text: chosen, sourceRef: item.id }] };
+  for (const records of [[memory(chosen).records[0], decision], [decision, memory(chosen).records[0]]]) {
+    assert.deepEqual(prepareExtraction(item, source, { records }, quoted).records.map(record => record.kind), ['decision']);
+  }
+});
+
+test('a host notification states nothing: no selected memory, no decision from a reason alone', () => {
+  const notice = { id: item.id, source: { role: null } };
+  assert.equal(prepareExtraction(notice, report, memory(lesson), quoted).records.length, 0);
+  const fields = [['chosen', lesson], ['reason', condition]].map(([name, text]) => ({ name, text, sourceRef: item.id }));
+  assert.equal(prepareExtraction(notice, report, { records: [{ kind: 'decision', fields }] }, quoted).records.length, 0);
+});
+
+test('a receipt from the earlier quoted prompt version is read as the quoted recipe: only the prompt version changed', () => {
+  const graph = createShadowGraph();
+  const captured = privilegedRecordCapture(graph, { project: 'fixture', originId: 'fixture-origin', text: report,
+    source: { event: 'Stop', sessionId: 'session-1', role: 'assistant' },
+    admission: { limits: { maxStoreBytes: 2 ** 24, maxQueueDepth: 100, maxItemBytes: 65536, maxItemsPerSession: 100 }, storeBytes: 0 } });
+  const lease = { leaseId: 'lease-1', ownerId: 'worker', ownerBootId: 'boot', leaseExpiresAt: new Date(Date.now() + 60000).toISOString() };
+  privilegedClaimCapture(graph, { id: captured.id, project: 'fixture', lease });
+  privilegedCompleteExtraction(graph, { id: captured.id, leaseId: lease.leaseId, prepared: { records: [], unsupported: [] }, key: 'k',
+    receipt: { promptVersion: 'capture-quoted-fields-corrections-v2', schemaVersion: 'capture-quoted-corrections-v2', model: 'claude-sonnet-5-5', at: new Date().toISOString(), invocationStarted: true, usage: {} } });
+  assert.deepEqual(privilegedInspectCapture(graph, { project: 'fixture' }).items[0].reprocessReasons, ['promptVersion']);
 });
 
 test('a report\'s decision with a stated reason and no rejected alternative keeps the choice; the reason stays in the message', () => {

@@ -22,7 +22,10 @@
 - Add `shadowgraph --version` (`-v`).
 - On the quoted recipe, a statement inside a longer message is kept as a memory with the whole message attached, labelled as the model's selection, as decisions and attempts already were. Before, an end-of-turn report, where reasons and conditions are stated, produced no record: no single sentence of it is a quotation by itself. The claim verifier is unchanged.
 - An assistant report's decision that states a reason but names no rejected alternative keeps its choice; the reason stays in the attached message. Before, the decision was dropped. A user's such message is kept whole as a memory, as before.
-- A message that also asks a question keeps its statements the same way (rule `whole-source-v1`: the message's own words, not checked as a statement). A question is never kept as a record.
+- A message that holds a question mark keeps its statements the same way, with the message word for word and no checked claim. A question is never kept as a record.
+- A memory selected on this path covers a whole statement. A fragment cut out of a sentence, which could drop that sentence's own negation, is refused.
+- A decision the model also listed as a memory of the same sentence is kept as the decision, whichever came first.
+- Capture inspection reads a receipt from the earlier quoted prompt version as the quoted recipe, and reports only `promptVersion` as changed.
 - The quoted prompt asks for decisions, attempts with their outcome and stated reason, and conditions, and to leave out status lines and questions. Prompt version `capture-quoted-fields-corrections-v3`.
 - A subagent's final report or a host notification that arrives as a prompt is no longer recorded as the user's words, and no longer triggers a second delivery of the same records.
 

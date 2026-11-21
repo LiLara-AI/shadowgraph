@@ -113,7 +113,8 @@ export async function claimCapture(options) {
         ? graph.context({ project: item.project, query: text, limit: CANDIDATE_READ, compact: false }).relevant.items.flatMap(({ record }) => {
           const sourceCapture = live.records.find(value => value.id === record?.captureRef);
           const original = live.records.find(value => value.id === record?.id);
-          const prior = record?.kind === 'decision' ? record.chosen : record?.kind === 'memory' && record.status === 'active' ? record.text : null;
+          // A sentence the model selected from a message is no decision kept verbatim.
+          const prior = record?.kind === 'decision' ? record.chosen : record?.kind === 'memory' && record.status === 'active' && !record.interpretation ? record.text : null;
           return typeof prior === 'string' && prior && original && !record.memoryDependencies?.length
             && !['superseded', 'archived', 'abandoned', 'stale'].includes(record.status)
             && sourceCapture?.source?.role === 'user' && sameExtractionBinding(sourceCapture.observation?.extractionBinding, options.extractionBinding)

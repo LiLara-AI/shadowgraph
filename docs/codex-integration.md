@@ -141,7 +141,10 @@ than erasing relevant past outcomes. Capture consent never grants wider reads.
 For ordinary multi-sentence material, Codex can propose a structured interpretation
 using exact source quotations. Each such record is explicitly model-proposed and
 unverified, and includes the entire source context; only that full quotation is
-checked by the existing deterministic verifier. Field roles and relationships
+checked by the existing deterministic verifier. A source that holds a question
+mark is not a statement to the verifier: its record carries the source word for
+word and no checked claim. A memory's text covers a whole statement, never a
+fragment of a sentence, and no selected field is a question. Field roles and relationships
 are not presented as independently verified facts. Compact delivery discloses
 this limitation and includes context or requires full expansion.
 
