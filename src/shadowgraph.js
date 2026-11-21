@@ -1716,7 +1716,8 @@ export function createShadowGraph(options = {}) {
     };
     const errors = sessions.filter(session => owns(session) && session.extraction?.state === 'blocked' && isValidIsoInstant(session.extraction.at) && !priorOnly(session));
     if (errors.length) status.workerErrors = [...new Set(errors.map(session => workerReason(session.extraction.reason)))].map(reason => ({ reason, at: errors.filter(session => workerReason(session.extraction.reason) === reason).map(session => session.extraction.at).sort(compareInstants)[0] }));
-    if (!errors.length && typeof options.extractionAvailable === 'function') status.extractionAvailable = options.extractionAvailable(scope) === true;
+    // A session passed over at its ceiling is named above; the worker still runs for every other session.
+    if (errors.every(session => workerReason(session.extraction.reason) === 'session_journal') && typeof options.extractionAvailable === 'function') status.extractionAvailable = options.extractionAvailable(scope) === true;
     return status;
   }
 
@@ -2342,6 +2343,14 @@ export function createShadowGraph(options = {}) {
     // The session's conversation captures, read again at completion: one recorded since the claim can pass the ceiling.
     if (input.journalCeiling !== undefined && sessionConversationCaptures(journal, item) > input.journalCeiling) throw Object.assign(new Error('session_journal'), { code: 'session_journal' });
     return { status: 'committed', produced: producedRecordIds.length, unsupported: input.prepared.unsupported.length };
+  }
+
+  // Tool calls the worker sets aside (extraction-worker.js), each through the
+  // ordinary claim and completion above, as one transaction: a completion by
+  // itself copies the whole graph more than once, and a batch of them held
+  // the store's lock for seconds while capture hooks waited.
+  function setAsideCaptures(inputs) {
+    return inputs.filter(({ claim, completion }) => claimCapture(claim) && completeExtraction(completion)).length;
   }
 
   function extractionStatus(input) {
@@ -7393,6 +7402,7 @@ export function createShadowGraph(options = {}) {
     bindProject: transactional('bindProject', bindProject), resolveProjectBinding,
     recordCapture: transactional('recordCapture', recordCapture), transitionCapture: transactional('transitionCapture', transitionCapture),
     claimCapture: transactional('claimCapture', claimCapture), completeExtraction: transactional('completeExtraction', completeExtraction, { mode: 'snapshot' }),
+    setAsideCaptures: transactional('setAsideCaptures', setAsideCaptures, { mode: 'snapshot' }),
     settleExtraction: transactional('settleExtraction', settleExtraction),
     extractionStatus: transactional('extractionStatus', extractionStatus),
     expireCapture: transactional('expireCapture', expireCapture, { mode: 'snapshot' }),

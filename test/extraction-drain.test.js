@@ -283,7 +283,7 @@ for (const type of ['json', 'sqlite']) {
     const result = await runExtractionDrain({ ...f.options, executor: { extract: async () => {
       calls++; await addCaptures(f, [{ event: 'Stop', sessionId: 'synthetic-session', text: 'A later synthetic report.' }]); return response;
     } } });
-    assert.equal(result.status, 'blocked'); assert.equal(result.blockedReason, 'session_journal'); assert.equal(calls, 1, 'the session over its ceiling is passed over, not sent again');
+    assert.deepEqual([result.status, result.passedOver], ['idle', 'session_journal']); assert.equal(calls, 1, 'the session over its ceiling is passed over, not sent again');
     const data = await f.read(); assert.equal(data.records.filter(x => x.kind !== 'capture').length, 0);
     assert.deepEqual(data.records.filter(x => x.kind === 'capture').map(x => x.state), ['pending', 'pending']);
     assert.ok(workerErrors(data).some(x => x.reason === 'session_journal'));
@@ -548,16 +548,17 @@ for (const type of ['json', 'sqlite']) {
     await addCaptures(f, [{ event: 'UserPromptSubmit', sessionId: 'second-session', text: 'Second session prompt.' }, { event: 'UserPromptSubmit', sessionId: 'other-session', project: 'q', text: 'Other project prompt.' }]);
     let calls = 0; const extract = async () => { calls++; return f.response; };
     const out = await runExtractionDrain({ ...f.options, scopes: [{ project: 'p' }, { project: 'q' }], executor: { extract } });
-    assert.deepEqual([out.status, out.blockedReason, out.completed, calls], ['blocked', 'session_journal', 2, 2]);
+    assert.deepEqual([out.status, out.passedOver, out.completed, calls], ['idle', 'session_journal', 2, 2]);
     let data = await f.read();
     assert.deepEqual(captures(data).map(x => [x.source.sessionId, x.state]), [['synthetic-session', 'pending'], ['synthetic-session', 'pending'], ['synthetic-session', 'pending'], ['second-session', 'extracted'], ['other-session', 'extracted']]);
     assert.ok(workerErrors(data).some(x => x.reason === 'session_journal'), 'the passed-over session is named in its scope');
-    const g = createShadowGraph(); g.importData(data);
+    const g = createShadowGraph({ extractionAvailable: () => true }); g.importData(data);
+    assert.equal(g.search('', { project: 'p' }).completeness.capture.extractionAvailable, true, 'extraction still runs for the scope\'s other sessions');
     assert.equal(g.search('', { project: 'q' }).completeness.capture.workerErrors, undefined, 'the other scope is clean');
     // A later drain is not starved by the same items: new work in another session is taken, nothing is spent on them.
     await addCaptures(f, [{ event: 'Stop', sessionId: 'third-session', text: 'Third session report.' }]);
     const later = await runExtractionDrain({ ...f.options, executor: { extract } });
-    assert.deepEqual([later.status, later.blockedReason, later.completed, calls], ['blocked', 'session_journal', 1, 3]);
+    assert.deepEqual([later.status, later.passedOver, later.completed, calls], ['idle', 'session_journal', 1, 3]);
     data = await f.read();
     assert.equal(captures(data).find(x => x.source.sessionId === 'third-session').state, 'extracted');
     assert.equal(captures(data).filter(x => x.state === 'pending').length, 3);

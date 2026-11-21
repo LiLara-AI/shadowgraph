@@ -695,6 +695,10 @@ test('no production code emits a capture journal type outside the writer', async
   assert.deepEqual(worker.match(/['"`](?:capture\.recorded|capture\.state_changed|extraction\.completed|extraction\.failed)['"`]/g), ["'capture.recorded'", "'capture.state_changed'"]);
   assert.match(worker, /entry\.type === 'capture\.recorded' && wanted\.has\(entry\.entityId\)/);
   assert.match(worker, /entry\.type === 'capture\.state_changed'/);
+  // The session counter reads creation witnesses the same way: a comparison only.
+  const counter = await readFile(join(root, 'src', 'internal', 'extraction-session.js'), 'utf8');
+  assert.deepEqual(counter.match(/['"`](?:capture\.recorded|capture\.state_changed|extraction\.completed|extraction\.failed)['"`]/g), ["'capture.recorded'"]);
+  assert.match(counter, /type === 'capture\.recorded'/);
   assert.deepEqual(usingTypes.sort(), ['src/internal/capture.js', 'src/journal.js', 'src/shadowgraph.js']);
   const kernel = await readFile(join(root, 'src', 'shadowgraph.js'), 'utf8');
   assert.deepEqual(kernel.match(/['"`](?:capture\.recorded|capture\.state_changed|extraction\.completed|extraction\.failed)['"`]/g), ["'capture.recorded'", ...Array(5).fill("'capture.state_changed'"), ...Array(2).fill("'extraction.completed'"), "'capture.state_changed'", "'extraction.failed'", "'capture.state_changed'"], 'recording, expiry, cancellation, owner reprocessing, deletion and leased extraction stay in the kernel writer');

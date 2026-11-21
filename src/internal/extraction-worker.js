@@ -10,7 +10,7 @@ import { repositoryOf } from './owner-files.js';
 import { attachDeletionView, readLedger, storeIo } from './deletion-knowledge.js';
 import { claimAuthorityInvalid, effectiveGeneration } from './capture-generation.js';
 import { captureRawExpired } from './capture-retention.js';
-import { privilegedClaimCapture, privilegedCompleteExtraction, privilegedExtractionStatus, privilegedLiveSnapshot, privilegedSettleExtraction, privilegedSnapshot } from './snapshot.js';
+import { privilegedClaimCapture, privilegedCompleteExtraction, privilegedExtractionStatus, privilegedLiveSnapshot, privilegedSetAsideCaptures, privilegedSettleExtraction, privilegedSnapshot } from './snapshot.js';
 import { extractionSchema, OUTPUT_SCHEMA_VERSION, PROMPT_VERSION, extractionPrompt, extractionText, prepareExtraction, quotedRecipe } from './extraction-output.js';
 import { FROZEN_WORKER_BUDGETS, withWorkerBudget } from './extraction-budget.js';
 import { invokeWithRetry, awaitWorkerStep } from './extraction-policy.js';
@@ -153,22 +153,22 @@ export async function setAsideToolCalls(options) {
   if (options.provider === 'codex' && !validExtractionBinding(options.extractionBinding)) refusal('capture_provenance_required');
   return fenced(options, async ({ graph, ledger, at, commit }) => {
     const live = privilegedLiveSnapshot(graph);
-    let settled = 0;
+    // Nothing of the text is read, so a call with none (only a delivered block) is settled too.
+    const batch = [];
     for (const item of live.records) {
-      if (settled >= SET_ASIDE_BATCH) break;
+      if (batch.length >= SET_ASIDE_BATCH) break;
       if (!claimable(item, options, ledger, at) || !isToolCall(item) || item.reprocessRequest !== undefined
         || (item.state === 'processing' && Date.parse(item.lease?.leaseExpiresAt) > Date.parse(at))) continue;
-      const source = raw(live, item); if (typeof source !== 'string' || !extractionText(source).trim()) continue;
       const lease = newLease(options, at), selected = { ...item, lease };
       if (claimAuthorityInvalid(selected, live, at)) continue;
-      const generation = effectiveGeneration(selected, ledger, live, at);
-      if (!privilegedClaimCapture(graph, { id: item.id, project: options.project, originId: options.originId, lease })) continue;
-      privilegedCompleteExtraction(graph, { id: item.id, leaseId: lease.leaseId, prepared: { records: [], unsupported: [] }, key: item.id,
-        receipt: { at, generation, invocationStarted: false, notSent: 'tool_call' }, attemptCount: 0 });
-      settled += 1;
+      batch.push({ claim: { id: item.id, project: options.project, originId: options.originId, lease },
+        completion: { id: item.id, leaseId: lease.leaseId, prepared: { records: [], unsupported: [] }, key: item.id,
+          receipt: { at, generation: effectiveGeneration(selected, ledger, live, at), invocationStarted: false, notSent: 'tool_call' }, attemptCount: 0 } });
     }
+    // One transaction for the batch: the store's lock is held for one pass, not one per item.
+    const settled = batch.length ? privilegedSetAsideCaptures(graph, batch) : 0;
     if (settled) await commit(privilegedSnapshot(graph));
-    return { settled, more: settled >= SET_ASIDE_BATCH };
+    return { settled, more: batch.length >= SET_ASIDE_BATCH };
   });
 }
 
@@ -298,8 +298,8 @@ export async function runExtractionDrain(options) {
           const storeReceiptWritten = await recordWorkerStatus({ ...options, signal }, refusedInScope ? 'provider_refusal' : overCeilingInScope ? 'session_journal' : null);
           overCeilingAny ||= overCeilingInScope;
           if (++scopeIndex < scopes.length) { selectScope(); refusedInScope = false; overCeilingInScope = false; continue; }
-          return overCeilingAny ? { status: 'blocked', blockedReason: 'session_journal', completed, storeReceiptWritten, ...more() }
-            : { status: 'idle', completed, storeReceiptWritten, ...more() };
+          // A session left at its ceiling is ordinary operation, named here and in its scope's status, not a stop.
+          return { status: 'idle', completed, storeReceiptWritten, ...(overCeilingAny ? { passedOver: 'session_journal' } : {}), ...more() };
         }
         attempts = 0;
         const correlationToken = `sgcorr_${randomUUID()}`;
