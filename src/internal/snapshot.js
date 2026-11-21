@@ -82,6 +82,9 @@ export function privilegedTransitionCapture(graph, input) {
 export function privilegedClaimCapture(graph, input) {
   return primitive(graph, 'claimCapture', 'privilegedClaimCapture')(input);
 }
+export function privilegedSetAsideCaptures(graph, inputs) {
+  return primitive(graph, 'setAsideCaptures', 'privilegedSetAsideCaptures')(inputs);
+}
 export function privilegedCompleteExtraction(graph, input) {
   return primitive(graph, 'completeExtraction', 'privilegedCompleteExtraction')(input);
 }

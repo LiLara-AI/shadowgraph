@@ -12,7 +12,7 @@ Claude Desktop, the interactive TUI's resume flows and other platforms are outsi
 | Step | What runs | Notes |
 | --- | --- | --- |
 | Capture | `capture --hook` on UserPromptSubmit, PostToolUse, PostToolUseFailure, Stop, PreCompact and SessionEnd | Each event is redacted and kept in an owner-only spool before the store is touched (see below). |
-| Extraction | Spawned after Stop or SessionEnd as a detached one-shot worker | It runs `claude -p` as a **separate executor**, with no tools, MCP servers, hooks, skills or settings, on the model you selected. It never shares the host session's process. |
+| Extraction | Spawned after a prompt, Stop or SessionEnd as a detached one-shot worker; tool calls are kept as evidence and not sent to it | It runs `claude -p` as a **separate executor**, with no tools, MCP servers, hooks, skills or settings, on the model you selected. It never shares the host session's process. |
 | Delivery | `deliver --hook` on SessionStart and UserPromptSubmit | SessionStart delivers the project's working set, each record as its line (the full record only when the line would drop a decisive part). A prompt receives what is relevant to it. |
 | Sharing | `shadowgraph sharing …` | Project-only by default. |
 
@@ -51,6 +51,9 @@ Managed policy is never bypassed:
 
 The runtime-evidence profile runs the quoted recipe with corrections:
 - Fields quote the source exactly.
+- A statement inside a longer message (an end-of-turn report, a multi-sentence prompt) is kept with the whole message attached. The claim verifier accepts a sentence as a quotation only when it is the whole source, so the checked quotation is the message, and which sentence was selected is the model's interpretation. The record says so: its line opens with `Model-proposed field interpretation, not verified facts`, and asks for expansion when the message does not fit the line. This applies to decisions, attempts and other experience (memories). A memory's selection covers a whole statement: a fragment cut out of a sentence, which could leave out that sentence's own negation, is not kept. A message that holds a question mark is kept the same way, word for word, but its record carries no checked claim, since the verifier does not class such a text as a statement; a question itself is never kept as a record. Messages over 8,192 characters are not kept this way.
+- The prompt asks for what a later session needs: decisions, what was tried with its outcome and stated reason, and the conditions or limits that applied. It asks the model to leave out status lines, progress narration, plans not yet carried out and questions.
+- A host message that arrives as a prompt is not recorded as the user's words. A subagent's final report (`<agent-message ...>`) is recorded as assistant text, and a host notification with no role. Only a user's own message can be kept whole as a decision or correct an earlier decision. Such a message does not get a second prompt-time delivery either.
 - A later user message that explicitly corrects an earlier user decision proposes a correction. The kernel then supersedes the earlier decision and keeps its history. When the earlier decision was kept verbatim as the user's message, the correction is linked to it but not applied: the message may say more than the correction replaces. The message stays current, and every read names the decision that corrects it (`correctedBy`).
 
 ### Which sessions are extracted

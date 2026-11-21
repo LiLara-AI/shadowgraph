@@ -123,6 +123,18 @@ export function toolOutcome({ event, toolCallId, toolName, toolInput, toolRespon
   return outcomeFromExitStatus(succeeded ? 0 : undefined, { event, toolCallId, toolName });
 }
 
+// Whose words a prompt event carries. The host delivers its own messages as
+// prompts too, each opening with its envelope: a subagent's final report is
+// model output, and a notification is nobody's statement. Only a user's own
+// message may be kept whole as a decision or correct an earlier one
+// (extraction-output.js), so neither is recorded as the user's. Text a user
+// types that opens with an envelope loses that standing and nothing else.
+const HOST_ENVELOPES = Object.freeze({ 'agent-message': 'assistant', 'task-notification': null, 'side-sessions-event': null, 'ci-monitor-event': null });
+export function promptRole(prompt) {
+  const envelope = /^\s*<([a-z-]+)[\s>]/u.exec(prompt)?.[1];
+  return Object.hasOwn(HOST_ENVELOPES, envelope) ? HOST_ENVELOPES[envelope] : 'user';
+}
+
 // A host event as capture takes it (plan §12.1; the host's documented fields,
 // confirmed at AG-2), or null when it carries nothing to capture: its session,
 // working directory, the material, what identifies it, and its transcript's
@@ -135,7 +147,7 @@ export function observedEvent(payload) {
   const event = payload.hook_event_name;
   const transcriptPath = named(payload.transcript_path) && isAbsolute(payload.transcript_path) && payload.transcript_path.toLowerCase().endsWith('.jsonl') ? payload.transcript_path : null;
   const base = { event, sessionId: payload.session_id, cwd: named(payload.cwd) ? payload.cwd : null, role: null, hostEventId: null, toolCallId: null, toolName: null, toolInput: null, prompt: null, outcome: null, transcriptPath };
-  if (event === 'UserPromptSubmit') return named(payload.prompt) ? { ...base, role: 'user', hostEventId: named(payload.message_id) ? payload.message_id : null, prompt: payload.prompt, text: payload.prompt } : null;
+  if (event === 'UserPromptSubmit') return named(payload.prompt) ? { ...base, role: promptRole(payload.prompt), hostEventId: named(payload.message_id) ? payload.message_id : null, prompt: payload.prompt, text: payload.prompt } : null;
   if (event === 'Stop') return named(payload.last_assistant_message) ? { ...base, role: 'assistant', text: payload.last_assistant_message } : base;
   if (event === 'PreCompact' || event === 'SessionEnd') return base;
   if (!named(payload.tool_name)) return null;

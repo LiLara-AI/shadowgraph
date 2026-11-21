@@ -75,7 +75,9 @@ From an enrolled workspace run `shadowgraph-codex run --home <private-dir>` and
 enter ordinary task prompts, one line per turn, or use `--prompt <text>`. No
 remember/search/extract command is required. The current implementation captures
 user text, final assistant messages and native command-execution events. Other
-tool-event coverage must be checked before claiming it. Extraction children are
+tool-event coverage must be checked before claiming it. Command-execution events
+are tool calls: they are kept as evidence and are not sent to the extraction
+model unless the owner asks to reprocess one. Extraction children are
 separate from the observed host stream, so they cannot recapture themselves.
 
 Ordinary interactive sessions have no demonstration turn/call/deadline ceiling.
@@ -141,7 +143,10 @@ than erasing relevant past outcomes. Capture consent never grants wider reads.
 For ordinary multi-sentence material, Codex can propose a structured interpretation
 using exact source quotations. Each such record is explicitly model-proposed and
 unverified, and includes the entire source context; only that full quotation is
-checked by the existing deterministic verifier. Field roles and relationships
+checked by the existing deterministic verifier. A source that holds a question
+mark is not a statement to the verifier: its record carries the source word for
+word and no checked claim. A memory's text covers a whole statement, never a
+fragment of a sentence, and no selected field is a question. Field roles and relationships
 are not presented as independently verified facts. Compact delivery discloses
 this limitation and includes context or requires full expansion.
 

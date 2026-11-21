@@ -14,7 +14,7 @@ import { pathToFileURL } from 'node:url';
 import { readExtractionAvailability } from './internal/extraction-availability.js';
 import { RAW_RETENTION_DAYS } from './internal/capture-retention.js';
 import { extractionSupersession } from './internal/extraction-supersession.js';
-import { activeCapture, storeRepository } from './capture-hook.js';
+import { activeCapture, promptRole, storeRepository } from './capture-hook.js';
 import { spoolDirectory, spoolStatus } from './internal/capture-spool.js';
 import { createShadowGraph, MAX_PAGE_LIMIT, SCHEMA_VERSION } from './shadowgraph.js';
 import { show, t1Line } from './compact-tier.js';
@@ -408,7 +408,9 @@ export async function runDeliver({ args = [], readInput = () => '', file, storag
     trigger = event.hook_event_name;
     const session = trigger === 'SessionStart';
     const prompt = session ? '' : typeof event.prompt === 'string' ? event.prompt : '';
-    if (!session && !prompt.trim()) return;
+    // The host's own message arriving as a prompt (a subagent's report, a
+    // notification) is not the user asking: it gets no second delivery.
+    if (!session && (!prompt.trim() || promptRole(prompt) !== 'user')) return;
     const read = await readStoreForDelivery(pinned ? pinned.store : { file, storage });
     const unavailable = read.unavailable ?? (read.payload?.schemaVersion > SCHEMA_VERSION ? 'newer_schema' : null);
     const cannotLoad = (reason) => {

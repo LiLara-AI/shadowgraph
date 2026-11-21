@@ -58,6 +58,7 @@ function deliver(w, event, prompt, args = ['--hook']) {
     child.on('error', fail);
     child.on('close', (code) => {
       assert.deepEqual([code, stderr], [0, '']);
+      if (!stdout) return done(null); // the hook delivered nothing
       const text = JSON.parse(stdout).hookSpecificOutput.additionalContext;
       const lines = text.split('\n');
       const field = (name) => JSON.parse(lines.find((line) => line.startsWith(`${name}: `)).slice(name.length + 2));
@@ -165,6 +166,9 @@ test('UserPromptSubmit: a matching record too large for the payload is delivered
   const { head, items } = await deliver(w, 'UserPromptSubmit', 'How should deposits be reconciled with the two-pass matcher?');
   assert.deepEqual([head.total, head.delivered, head.omittedForSize], [1, 1, 0]);
   asLine(items[0], record);
+  // The same words in the host's own message (a subagent's report arrives as a
+  // prompt) are not the user asking: the records are not delivered again.
+  assert.equal(await deliver(w, 'UserPromptSubmit', '<agent-message from="a1b2">\nHow should deposits be reconciled with the two-pass matcher?\n</agent-message>'), null);
 });
 
 test('an attempt reason the extractor kept without a verified cause is shown, labelled model-proposed; none stays unknown', () => {
