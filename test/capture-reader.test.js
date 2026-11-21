@@ -664,6 +664,8 @@ test('attribution refuses an origin that holds a capture, and a record a capture
 // src/journal.js) and by the writer (PR-34: recordCapture names the recording;
 // moves may come from capture.js, and lifecycle writes name state changes).
 // The restore wrapper names a state change only to verify deletion identity.
+// The extraction session counter names a recording only to count a session's
+// conversation captures (src/internal/extraction-session.js).
 // Apart from the writer, the only
 // code that journals one is import's journal-less normalisation of an item it
 // was given (snapshotType). The scan covers src/ and scripts/.
@@ -686,13 +688,17 @@ test('no production code emits a capture journal type outside the writer', async
     if (/['"`](?:capture\.recorded|capture\.state_changed|extraction\.completed|extraction\.failed)['"`]/.test(text)) naming.push(name);
     if (/CAPTURE_(?:IMPORT_TYPE|ENTRY_STATES|ENTRY_TYPES)\b/.test(text)) usingTypes.push(name);
   }
-  assert.deepEqual(naming.sort(), ['src/internal/capture.js', 'src/internal/extraction-worker.js', 'src/internal/restore-wrapper.js', 'src/journal.js', 'src/shadowgraph.js']);
+  assert.deepEqual(naming.sort(), ['src/internal/capture.js', 'src/internal/extraction-session.js', 'src/internal/extraction-worker.js', 'src/internal/restore-wrapper.js', 'src/journal.js', 'src/shadowgraph.js']);
   // The worker reads creation and owner-request witnesses. Both literal uses
   // must remain comparisons, never journal emissions.
   const worker = await readFile(join(root, 'src', 'internal', 'extraction-worker.js'), 'utf8');
   assert.deepEqual(worker.match(/['"`](?:capture\.recorded|capture\.state_changed|extraction\.completed|extraction\.failed)['"`]/g), ["'capture.recorded'", "'capture.state_changed'"]);
   assert.match(worker, /entry\.type === 'capture\.recorded' && wanted\.has\(entry\.entityId\)/);
   assert.match(worker, /entry\.type === 'capture\.state_changed'/);
+  // The session counter reads creation witnesses the same way: a comparison only.
+  const counter = await readFile(join(root, 'src', 'internal', 'extraction-session.js'), 'utf8');
+  assert.deepEqual(counter.match(/['"`](?:capture\.recorded|capture\.state_changed|extraction\.completed|extraction\.failed)['"`]/g), ["'capture.recorded'"]);
+  assert.match(counter, /type === 'capture\.recorded'/);
   assert.deepEqual(usingTypes.sort(), ['src/internal/capture.js', 'src/journal.js', 'src/shadowgraph.js']);
   const kernel = await readFile(join(root, 'src', 'shadowgraph.js'), 'utf8');
   assert.deepEqual(kernel.match(/['"`](?:capture\.recorded|capture\.state_changed|extraction\.completed|extraction\.failed)['"`]/g), ["'capture.recorded'", ...Array(5).fill("'capture.state_changed'"), ...Array(2).fill("'extraction.completed'"), "'capture.state_changed'", "'extraction.failed'", "'capture.state_changed'"], 'recording, expiry, cancellation, owner reprocessing, deletion and leased extraction stay in the kernel writer');

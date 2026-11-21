@@ -4,6 +4,9 @@
 
 ### Fixed
 
+- Extraction no longer sends tool calls to the model. Each one cost a model call and could only become a copy of its own recorded input and output, and in strict capture order they kept the conversation, where decisions and reasons are stated, from being reached. The worker now settles a tool call `extracted` by code, with no records, no usage charged and a receipt that says no model ran; its raw stays as evidence for normal retention. An owner's `extract --reprocess` still sends one.
+- The 128-per-session extraction ceiling counts conversation captures only, not tool calls or journal entries, and a session over it is passed over instead of stopping the drain: other sessions and projects are extracted, the scope's status still names `session_journal`, and `extractionAvailable` stays true. A capture sent to the model more than once counts once per send. One long session had stopped all extraction until its captures expired.
+- A prompt now starts the extraction worker as a Stop or SessionEnd does, so work the hourly limit left waiting drains when the session is used again instead of waiting for a turn to end.
 - Redact cookie headers in linear time: a long run of `cookie:` text no longer stalls capture past its deadline and drops its own event.
 - Scrub the old bytes on SQLite when expiry blanks unsupported extraction output in place, as the API reference promises.
 - Keep only redacted host output in the Codex wrapper's private `turn-N-host.json` files.
@@ -20,6 +23,14 @@
 - The spool-wait redaction test accepts `out_of_time` as well as `store_busy`, as the other spool deadline tests do on slow Windows runners.
 - `shadowgraph_context` keeps its advisory collections to the own project when `includeCrossProject: false` is passed with a `task`.
 - Add `shadowgraph --version` (`-v`).
+- On the quoted recipe, a statement inside a longer message is kept as a memory with the whole message attached, labelled as the model's selection, as decisions and attempts already were. Before, an end-of-turn report, where reasons and conditions are stated, produced no record: no single sentence of it is a quotation by itself. The claim verifier is unchanged.
+- An assistant report's decision that states a reason but names no rejected alternative keeps its choice; the reason stays in the attached message. Before, the decision was dropped. A user's such message is kept whole as a memory, as before.
+- A message that holds a question mark keeps its statements the same way, with the message word for word and no checked claim. A question is never kept as a record.
+- A memory selected on this path covers a whole statement. A fragment cut out of a sentence, which could drop that sentence's own negation, is refused.
+- A decision the model also listed as a memory of the same sentence is kept as the decision, whichever came first.
+- Capture inspection reads a receipt from the earlier quoted prompt version as the quoted recipe, and reports only `promptVersion` as changed.
+- The quoted prompt asks for decisions, attempts with their outcome and stated reason, and conditions, and to leave out status lines and questions. Prompt version `capture-quoted-fields-corrections-v3`.
+- A subagent's final report or a host notification that arrives as a prompt is no longer recorded as the user's words, and no longer triggers a second delivery of the same records.
 
 ## 0.44.4 (2026-11-12)
 

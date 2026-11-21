@@ -11,7 +11,7 @@ const source = path => readFile(new URL(`../src/${path}`, import.meta.url), 'utf
 const inventory = {
   material: 'replaceData addDecision addAttempt remember applyMemoryPlan addFact migrateAttribution backfillErasureTokens attribute verifyFact setOutcome addConfidenceEvidence updateDecisionStatus supersedeDecision link purgeProject purgeOrigin importData bindProject requestReprocess cancelCapture deleteCapture completeCaptureDelete reapplyDeletion completePurge',
   authority: 'requestAccess issueAccess ownerIssueAccess revokeAccess discardAccess',
-  capture: 'recordCapture transitionCapture claimCapture completeExtraction settleExtraction expireCapture recordSelfEvent recordTranscript',
+  capture: 'recordCapture transitionCapture claimCapture completeExtraction setAsideCaptures settleExtraction expireCapture recordSelfEvent recordTranscript',
   audit: 'memoryHistory traverse expand redact review reconsider maintain getReviewSignals acknowledgeReview search retrieve recall validate repairPlan context reviewContext exportData getJournal rebuild stats accessRefusal'
   // Worker diagnostics change session status only, never claim material or authority.
   , operational: 'extractionStatus'

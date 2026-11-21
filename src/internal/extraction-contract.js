@@ -8,7 +8,10 @@ export const accountEmailDigest = (salt, email) => typeof email === 'string' && 
 export const EXTRACTION_MODEL = 'claude-opus-5[1m]';
 export const CODEX_EXTRACTION_MODEL = 'gpt-6.1-sol';
 export const CODEX_CONFIGURATION = 'codex-subscription-text-only-v1';
-export const CODEX_PROMPT_VERSION = 'capture-quoted-fields-corrections-v2';
+export const CODEX_PROMPT_VERSION = 'capture-quoted-fields-corrections-v3';
+// Every prompt version of the quoted recipe, so a receipt from an earlier one
+// is still read as that recipe's: only its prompt version has changed since.
+export const QUOTED_PROMPT_VERSIONS = Object.freeze(['capture-quoted-fields-corrections-v2', CODEX_PROMPT_VERSION]);
 export const CODEX_OUTPUT_SCHEMA_VERSION = 'capture-quoted-corrections-v2';
 export function extractionModel(provider = 'claude') {
   if (provider === 'claude') return EXTRACTION_MODEL;

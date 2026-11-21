@@ -21,7 +21,7 @@ import { extractionSupersession } from './internal/extraction-supersession.js';
 import { accessScopeContains, validateAccess, intersectAccessScope, accessDiagnostics, reconcileAccessLedger } from './access.js';
 import { createAccessLifecycle } from './internal/access-lifecycle.js';
 import { assertCreationInput } from './internal/creation-id.js';
-import { EXTRACTION_RECIPE, CURRENT_EXTRACTION_MODELS, CODEX_EXTRACTION_MODEL, CODEX_PROMPT_VERSION, CODEX_OUTPUT_SCHEMA_VERSION } from './internal/extraction-contract.js';
+import { EXTRACTION_RECIPE, CURRENT_EXTRACTION_MODELS, CODEX_EXTRACTION_MODEL, CODEX_PROMPT_VERSION, CODEX_OUTPUT_SCHEMA_VERSION, QUOTED_PROMPT_VERSIONS } from './internal/extraction-contract.js';
 import { attemptOutcome } from './internal/outcome.js';
 import { RUNTIME_MISSES, missReachedBy, runtimeMissLedgerIssue, withFallbackMisses } from './internal/miss-ledger.js';
 import { supersessionOrder, temporalEvidence, versionTimes } from './internal/temporal-evidence.js';
@@ -35,7 +35,7 @@ import { CREDENTIAL_WITHHELD, captureWithheld, redactText, redactValue, withhold
 import { provenToolInputSplit } from './internal/tool-material.js';
 import { RAW_EXPIRED, RAW_RETENTION_DAYS, captureRawExpired, effectiveCaptureExpiry, hasCaptureRetentionState } from './internal/capture-retention.js';
 import { invalidatedCaptureTokens } from './internal/capture-generation.js';
-import { sessionJournalEntries, workerReason } from './internal/extraction-session.js';
+import { sessionConversationCaptures, workerReason } from './internal/extraction-session.js';
 import { PRIOR_SETUP, sameExtractionBinding } from './internal/extraction-provenance.js';
 import { DELETION_INTENT, DELETION_VIEW, IDEMPOTENCY_KEY_WITHHELD, PURGE_AWARE_RESTORE_UNSUPPORTED, PURGE_BACKUPS_STATEMENT, SCOPE_KEY_WITHHELD, SESSION_WITHHELD, deletionError, journalHead } from './internal/deletion-knowledge.js';
 
@@ -1524,8 +1524,9 @@ export function createShadowGraph(options = {}) {
       const last = item.receipts.at(-1);
       // A Claude receipt on the quoted recipe ran the model its activation selected.
       const recipe = last?.provider === 'codex' ? { ...EXTRACTION_RECIPE, model: CODEX_EXTRACTION_MODEL, promptVersion: CODEX_PROMPT_VERSION, schemaVersion: CODEX_OUTPUT_SCHEMA_VERSION }
-        : last?.promptVersion === CODEX_PROMPT_VERSION && CURRENT_EXTRACTION_MODELS.includes(last.model) ? { model: last.model, promptVersion: CODEX_PROMPT_VERSION, schemaVersion: CODEX_OUTPUT_SCHEMA_VERSION } : EXTRACTION_RECIPE;
-      const recipeChanges = item.state === 'extracted'
+        : QUOTED_PROMPT_VERSIONS.includes(last?.promptVersion) && CURRENT_EXTRACTION_MODELS.includes(last.model) ? { model: last.model, promptVersion: CODEX_PROMPT_VERSION, schemaVersion: CODEX_OUTPUT_SCHEMA_VERSION } : EXTRACTION_RECIPE;
+      // A tool call set aside by code (notSent) holds no model result, so no recipe change can make it stale.
+      const recipeChanges = item.state === 'extracted' && !last?.notSent
         ? Object.keys(recipe).filter(key => item.receipts.at(-1)?.[key] !== recipe[key]) : [];
       const lastReprocessing = item.receipts.at(-1)?.reprocessing;
       const reprocessOutcome = lastReprocessing && typeof lastReprocessing === 'object' ? {
@@ -1715,7 +1716,8 @@ export function createShadowGraph(options = {}) {
     };
     const errors = sessions.filter(session => owns(session) && session.extraction?.state === 'blocked' && isValidIsoInstant(session.extraction.at) && !priorOnly(session));
     if (errors.length) status.workerErrors = [...new Set(errors.map(session => workerReason(session.extraction.reason)))].map(reason => ({ reason, at: errors.filter(session => workerReason(session.extraction.reason) === reason).map(session => session.extraction.at).sort(compareInstants)[0] }));
-    if (!errors.length && typeof options.extractionAvailable === 'function') status.extractionAvailable = options.extractionAvailable(scope) === true;
+    // A session passed over at its ceiling is named above; the worker still runs for every other session.
+    if (errors.every(session => workerReason(session.extraction.reason) === 'session_journal') && typeof options.extractionAvailable === 'function') status.extractionAvailable = options.extractionAvailable(scope) === true;
     return status;
   }
 
@@ -2338,8 +2340,17 @@ export function createShadowGraph(options = {}) {
       extractionOutput: { unsupported: clone(input.prepared.unsupported), createdAt: at, expiresAt: new Date(Date.parse(at) + 7 * 86_400_000).toISOString() } };
     assertJournalCapacity(1); captures.set(item.id, next);
     appendJournal({ type: 'extraction.completed', entityKind: CAPTURE_KIND, entityId: item.id, project: item.project, payload: next });
-    if (input.journalCeiling !== undefined && sessionJournalEntries(journal, item) > input.journalCeiling) throw Object.assign(new Error('session_journal'), { code: 'session_journal' });
+    // The session's conversation captures, read again at completion: one recorded since the claim can pass the ceiling.
+    if (input.journalCeiling !== undefined && sessionConversationCaptures(journal, item) > input.journalCeiling) throw Object.assign(new Error('session_journal'), { code: 'session_journal' });
     return { status: 'committed', produced: producedRecordIds.length, unsupported: input.prepared.unsupported.length };
+  }
+
+  // Tool calls the worker sets aside (extraction-worker.js), each through the
+  // ordinary claim and completion above, as one transaction: a completion by
+  // itself copies the whole graph more than once, and a batch of them held
+  // the store's lock for seconds while capture hooks waited.
+  function setAsideCaptures(inputs) {
+    return inputs.filter(({ claim, completion }) => claimCapture(claim) && completeExtraction(completion)).length;
   }
 
   function extractionStatus(input) {
@@ -7391,6 +7402,7 @@ export function createShadowGraph(options = {}) {
     bindProject: transactional('bindProject', bindProject), resolveProjectBinding,
     recordCapture: transactional('recordCapture', recordCapture), transitionCapture: transactional('transitionCapture', transitionCapture),
     claimCapture: transactional('claimCapture', claimCapture), completeExtraction: transactional('completeExtraction', completeExtraction, { mode: 'snapshot' }),
+    setAsideCaptures: transactional('setAsideCaptures', setAsideCaptures, { mode: 'snapshot' }),
     settleExtraction: transactional('settleExtraction', settleExtraction),
     extractionStatus: transactional('extractionStatus', extractionStatus),
     expireCapture: transactional('expireCapture', expireCapture, { mode: 'snapshot' }),
